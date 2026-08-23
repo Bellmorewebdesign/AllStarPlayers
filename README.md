@@ -52,14 +52,15 @@ Open `js/products.js` and copy the template at the top of the file into the `ASP
 }
 ```
 
-Save the file and refresh — that's it. No install, no compile, no deploy step beyond a commit.
+Save the file and refresh. There is nothing to install or compile, and nothing to do beyond
+committing the change.
 
 ### 3. Remove the placeholders
 
-The site currently ships with six **temporary preview entries** so the layout, filters and sorting
-can be seen working. They invent nothing — no brand, no product name, no price — and the
-photography is in-store crops of the supplied shop photograph. They sit together between two
-markers in `js/products.js`:
+The site ships with six **placeholder entries** so you can see the layout, filters and sorting
+working before the real catalog lands. They invent nothing: no brand, no product name, no price.
+The photography is cropped from the supplied shop interior photo. All six sit together between
+two markers in `js/products.js`:
 
 ```
 /* ===== TEMPORARY PREVIEW ENTRIES — DELETE THIS BLOCK … */
@@ -67,10 +68,10 @@ markers in `js/products.js`:
 /* ===== END OF TEMPORARY PREVIEW ENTRIES ===== */
 ```
 
-Delete everything between those markers in one step. Every "preview" notice on the site —
-the badges, the *Preview layout* note on the home page, the *Preview entries* bar and the
-*"The online collection is being loaded"* panel on the shop page — disappears automatically as
-soon as one real product exists.
+Delete everything between those markers in one step. Every placeholder notice on the site goes
+with them: the PREVIEW badges, the *Placeholder* note under the home page Featured row, the
+*Placeholders* bar on the shop page and the *"The online collection is being loaded"* panel. They
+all hide themselves the moment one real product exists.
 
 ### Categories
 
