@@ -1,12 +1,12 @@
 /* ==========================================================================
-   All Star Players — foundation
+   All Star Players / foundation
    Palette sampled from the store's own materials:
    black awning + warm-white signage + gold foil (IMG_0589 / IMG_0592).
    ========================================================================== */
 
 /* ---------- typefaces (self-hosted, no external requests) -------------
-   Display: Boldonse — heavy, contemporary, poster-weight caps.
-   Text:    Instrument Sans — clean grotesque for everything readable.
+   Display: Boldonse, heavy contemporary poster-weight caps.
+   Text:    Instrument Sans, a clean grotesque for everything readable.
    Both SIL Open Font License; the licences sit next to the files. */
 @font-face{
   font-family:"Boldonse";
@@ -195,7 +195,7 @@ h3,.h3{font-size:clamp(.78rem,1vw,.94rem);letter-spacing:-.004em}
 .btn__ico{width:14px;height:14px;flex:none;transition:transform .35s var(--ease-out)}
 .btn:hover .btn__ico{transform:translateX(4px)}
 
-/* gold — the primary Shop Now treatment */
+/* gold, the primary call to action */
 .btn--gold{background:var(--gold-grad);color:#0A0A0A;box-shadow:0 1px 0 rgba(255,255,255,.22) inset}
 .btn--gold::after{                    /* foil sweep */
   content:"";position:absolute;inset:0;z-index:-1;
@@ -428,15 +428,15 @@ h3,.h3{font-size:clamp(.78rem,1vw,.94rem);letter-spacing:-.004em}
 .mobile-cta.is-visible{transform:none}
 @media (max-width:720px){
   .mobile-cta{display:block}
-  body{padding-bottom:0}
-  .footer__bottom{padding-bottom:96px}
+  /* only the page that carries the bar leaves room for it */
+  .has-cta .footer__bottom{padding-bottom:92px}
 }
 
 /* ---------- scroll reveals ---------- */
 .js [data-reveal]{opacity:0;transform:translateY(26px);transition:opacity .8s var(--ease-out),transform .8s var(--ease-out)}
 .js [data-reveal].is-in{opacity:1;transform:none}
 .js [data-reveal="fade"]{transform:none}
-/* Sideways reveals belong to the two-column layouts only — on narrow
+/* Sideways reveals belong to the two-column layouts only. On narrow
    screens they would push a column past the viewport edge. */
 @media (min-width:901px){
   .js [data-reveal="left"]{transform:translateX(-30px)}

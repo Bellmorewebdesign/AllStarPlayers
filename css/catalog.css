@@ -1,6 +1,6 @@
 /* ==========================================================================
-   All Star Players — product card system
-   Shared by the home page (Featured) and the Shop page. Every card in the
+   All Star Players / product card system
+   Shared by the home page and the shop page. Every card on the
    site is rendered by js/catalog.js from the data in js/products.js.
    ========================================================================== */
 
@@ -9,13 +9,16 @@
   grid-template-columns:repeat(auto-fill,minmax(240px,1fr));
   gap:clamp(14px,1.6vw,26px) clamp(12px,1.4vw,22px);
 }
-@media (max-width:640px){
-  .product-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 12px}
+/* the row on the home page runs a touch wider per card */
+@media (min-width:641px){
+  .product-grid--featured{grid-template-columns:repeat(auto-fill,minmax(250px,1fr))}
 }
-@media (max-width:380px){
+@media (max-width:640px){
+  .product-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:16px 12px}
+}
+@media (max-width:360px){
   .product-grid{grid-template-columns:1fr}
 }
-.product-grid--featured{grid-template-columns:repeat(auto-fill,minmax(250px,1fr))}
 
 /* ---------- card ---------- */
 .card{
@@ -30,7 +33,7 @@
 .card:hover{border-color:var(--gold-line);transform:translateY(-4px);background:var(--char-2)}
 .card:focus-within{border-color:var(--gold-line)}
 
-/* spotlight — a restrained gold pool of light that follows the pointer */
+/* a restrained gold pool of light that follows the pointer */
 .card::before{
   content:"";position:absolute;inset:-1px;z-index:3;pointer-events:none;opacity:0;
   background:radial-gradient(340px circle at var(--mx,50%) var(--my,0%),rgba(228,178,74,.16),transparent 62%);
@@ -78,7 +81,6 @@
 .badge--limited{background:var(--bone);color:#0A0A0A;border-color:transparent}
 .badge--sale{background:#7A1F1F;color:var(--bone);border-color:transparent}
 .badge--soldout{background:rgba(10,10,10,.9);color:var(--bone-3)}
-.badge--preview{background:transparent;color:var(--gold);border-color:var(--gold-line)}
 
 /* ---------- sold out ---------- */
 .card__soldout{
@@ -127,21 +129,32 @@
   border:1px solid var(--line);padding:3px 6px;border-radius:1px;
 }
 
-/* card marked as a temporary preview entry */
-.card--preview{background:var(--char)}
-.card--preview .card__media::after{
-  content:"";position:absolute;inset:0;
-  background:linear-gradient(180deg,rgba(10,10,10,.12),rgba(10,10,10,.66));
+/* a card that is a photograph of the floor rather than a listing */
+.card--floor .card__media::after{
+  content:"";position:absolute;inset:0;pointer-events:none;
+  background:linear-gradient(180deg,rgba(10,10,10,0) 58%,rgba(10,10,10,.42) 100%);
 }
+.card__tag{
+  display:inline-flex;align-items:center;gap:7px;
+  font-size:.6rem;font-weight:700;letter-spacing:.18em;text-transform:uppercase;
+  color:var(--bone-3);
+}
+.card__tag::before{content:"";width:5px;height:5px;border-radius:50%;background:var(--gold);flex:none}
 
-/* ---------- preview / empty states ---------- */
-.preview-flag{
-  display:flex;flex-wrap:wrap;align-items:center;gap:10px 14px;
-  margin-bottom:18px;padding:11px 14px;
-  border:1px dashed var(--line-2);border-radius:var(--r);
-  font-size:.66rem;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--bone-3);
+/* ---------- the "these are photos, not listings" note ---------- */
+.floor-flag{
+  display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 14px;
+  margin-bottom:clamp(20px,2.6vw,32px);padding:13px 16px;
+  border:1px solid var(--line-2);border-left:2px solid var(--gold);border-radius:var(--r);
+  background:rgba(228,178,74,.035);
+  font-size:.78rem;line-height:1.55;color:var(--bone-3);
 }
-.preview-flag b{color:var(--gold);font-weight:700;letter-spacing:.14em}
+.floor-flag b{
+  color:var(--gold);font-weight:700;
+  font-size:.64rem;letter-spacing:.18em;text-transform:uppercase;
+}
+.floor-flag a{color:var(--bone-2);text-decoration:underline;text-underline-offset:3px;text-decoration-color:var(--gold-line)}
+.floor-flag a:hover{color:var(--gold)}
 
 /* ---------- empty / loading state ---------- */
 .catalog-note{

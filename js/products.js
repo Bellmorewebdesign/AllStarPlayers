@@ -1,72 +1,82 @@
 /* ==========================================================================
-   All Star Players — PRODUCT CATALOG (single source of truth)
+   All Star Players / the catalog
    --------------------------------------------------------------------------
-   Everything on the site that looks like a product — the Featured row on the
-   home page and the whole Shop page — is rendered from the ASP.products array
-   below by js/catalog.js. Nothing is hard-coded into the HTML, so a product
-   only ever has to be added in one place: this file.
+   Everything on the site that looks like a product comes from this one file.
+   The row on the home page and the whole Shop page are both drawn from
+   ASP.items by js/catalog.js, so nothing is ever typed twice.
 
-   ── HOW TO ADD A PRODUCT ────────────────────────────────────────────────
-   1. Drop the photographs into  assets/img/products/
-      (roughly 4:5 / portrait crops look best — e.g. 1000 x 1250).
-   2. Copy the template below, paste it into ASP.products, fill it in.
-   3. Save. That's it — no build step, no install, nothing to compile.
+   Right now ASP.items holds FLOOR PHOTOS, not listings. They are real
+   photographs of the store with the category written on them, and they carry
+   no product name, no price and no sizes, because none of that has been
+   supplied yet. Every category link on the site lands on at least one of
+   them, so nothing on the site is a dead end.
+
+   ── ADDING A REAL PRODUCT ───────────────────────────────────────────────
+   1. Put the photos in  assets/img/products/  (portrait, about 1000 x 1250).
+   2. Copy this template into ASP.items and fill it in.
+   3. Save and refresh. No build step, nothing to install.
 
    {
-     id:            'asp-0001',                  // unique, never reused
-     name:          'Product name',              // required
-     brand:         'Brand name',                // shown above the name
-     category:      't-shirts',                  // one slug from ASP.categories
-     price:         120,                         // number, USD. null = not shown
-     originalPrice: 160,                         // optional — draws a strike-through
-     image:         'assets/img/products/x.jpg', // main photograph
-     images:        ['assets/img/products/x-2.jpg'], // extra shots; the first one
-                                                 // becomes the hover image
-     alt:           'Short description of the photograph',   // accessibility
-     description:   'One or two lines of copy.',
-     featured:      true,      // shows in the Featured row on the home page
-     bestSeller:    false,     // adds the BEST SELLER badge + Best Sellers filter
-     newArrival:    true,      // adds the NEW badge + New Arrivals filter
-     limited:       false,     // adds the LIMITED badge
+     id:            'asp-0001',                   // unique, never reused
+     name:          'Product name',
+     brand:         'Brand name',                 // sits above the name
+     category:      't-shirts',                   // a slug from ASP.categories
+     categories:    ['t-shirts','hats'],          // optional, if it fits more
+                                                  // than one filter
+     price:         120,                          // number. Leave it out and
+                                                  // the card says "Ask in store"
+     originalPrice: 160,                          // optional, draws a strike
+     image:         'assets/img/products/x.jpg',
+     imageWebp:     'assets/img/products/x.webp', // optional, served first
+     images:        ['assets/img/products/x-2.jpg'],  // first one is the
+                                                      // hover photo
+     alt:           'What the photograph shows',
+     description:   'A line or two.',
+     featured:      true,        // puts it in the row on the home page
+     bestSeller:    false,       // badge + the Best Sellers filter
+     newArrival:    true,        // badge + the New Arrivals filter
+     limited:       false,       // badge
      sizes:         ['S','M','L','XL'],
      colors:        [{name:'Black',hex:'#101010'},{name:'Bone',hex:'#F1EDE4'}],
-     inStock:       true,
-     soldOut:       false,     // greys the photo + shows the SOLD OUT overlay
-     sortOrder:     10,        // lower numbers come first in "Featured"
-     url:           ''         // optional link (e.g. an Instagram post). Leave
-                               // empty and the card simply isn't clickable —
-                               // never point it at a checkout that isn't live.
+     soldOut:       false,       // greys the photo, stamps SOLD OUT
+     sortOrder:     10,          // low numbers come first under "Featured"
+     url:           ''           // optional link. Empty means the card is not
+                                 // clickable, which is right until there is
+                                 // somewhere real to send people.
    }
 
-   ── REMOVING THE PLACEHOLDERS ───────────────────────────────────────────
-   The entries currently in ASP.products are TEMPORARY PREVIEW ENTRIES. They
-   exist only so the layout, filters and sorting can be seen working before the
-   real catalog arrives. They carry `preview: true`, they invent no brand, no
-   product name and no price, and they are all kept together between the two
-   markers below. Delete everything between the markers in one step, add the
-   real products, and every "preview" notice on the site disappears by itself.
+   ── CLEARING THE FLOOR PHOTOS ───────────────────────────────────────────
+   They all sit between the two markers near the bottom of this file and all
+   carry `floor: true`. Delete that block in one go once the real catalog is
+   in. The "these are photos, not listings" notices on the home and shop
+   pages hide themselves as soon as one real product exists.
    ========================================================================== */
 
 window.ASP = window.ASP || {};
 var ASP = window.ASP;
 
-/* Store-wide catalog settings. */
 ASP.settings = {
   currency: 'USD',
   currencySymbol: '$',
   instagram: 'allstarplayers'
 };
 
-/* The categories used by the shop filters and the home-page tiles.
-   `new-arrivals` and `best-sellers` are smart categories: a product joins them
-   through its `newArrival` / `bestSeller` flag, so a t-shirt can be both a
-   T-Shirt and a New Arrival. */
+/* The filters on the shop page and the tiles on the home page both read this
+   list, in this order.
+
+   Add a category by adding a line. Two kinds exist:
+     plain   the product's `category` (or `categories`) has to match the slug
+     smart   the product joins through a flag, so a tee can be a T-Shirt and a
+             New Arrival at once
+
+   New Arrivals and Best Sellers are written out below and commented off,
+   because a floor photo cannot honestly claim to be either one. Put them back
+   the day real products start carrying `newArrival` / `bestSeller`. */
 ASP.categories = [
-  { slug: 'new-arrivals',        name: 'New Arrivals',          smart: 'newArrival' },
-  { slug: 'best-sellers',        name: 'Best Sellers',          smart: 'bestSeller' },
+  /* { slug: 'new-arrivals', name: 'New Arrivals', smart: 'newArrival' }, */
+  /* { slug: 'best-sellers', name: 'Best Sellers', smart: 'bestSeller' }, */
   { slug: 't-shirts',            name: 'T-Shirts' },
   { slug: 'hoodies-sweatshirts', name: 'Hoodies & Sweatshirts' },
-  { slug: 'jackets',             name: 'Jackets' },
   { slug: 'pants',               name: 'Pants' },
   { slug: 'shorts',              name: 'Shorts' },
   { slug: 'sneakers',            name: 'Sneakers' },
@@ -74,59 +84,160 @@ ASP.categories = [
   { slug: 'accessories',         name: 'Accessories' }
 ];
 
-ASP.products = [
+ASP.items = [
 
-  /* ===== TEMPORARY PREVIEW ENTRIES — DELETE THIS BLOCK WHEN THE REAL
-     ===== CATALOG IS ADDED. Photographs are in-store crops of IMG_0596,
-     ===== not product shots, and no name, brand or price is invented. */
+  /* ===== FLOOR PHOTOS. DELETE THIS BLOCK WHEN THE REAL CATALOG LANDS =====
+     ===== Every photo below was taken in the store. Nothing here invents a
+     ===== brand, a product name, a size or a price. ===================== */
 
   {
-    id: 'preview-tees',
-    preview: true,
-    category: 't-shirts',
-    image: 'assets/img/cat-tees-780.jpg',
-    imageWebp: 'assets/img/cat-tees-780.webp',
-    alt: 'Graphic t-shirts hanging on the wall inside the All Star Players store',
-    featured: true,
-    sortOrder: 10
+    id: 'floor-tees-flat', floor: true, category: 't-shirts',
+    name: 'Horseshoe graphic tee, gold on black',
+    image: 'assets/img/floor-tees-flat-592.jpg',
+    imageWebp: 'assets/img/floor-tees-flat-592.webp',
+    imageSmall: 'assets/img/floor-tees-flat-400.jpg',
+    imageSmallWebp: 'assets/img/floor-tees-flat-400.webp',
+    alt: 'A black tee laid out flat with a large gold horseshoe graphic across the front',
+    featured: true, sortOrder: 10
   },
   {
-    id: 'preview-hoodies',
-    preview: true,
-    category: 'hoodies-sweatshirts',
-    image: 'assets/img/cat-stacks-840.jpg',
-    imageWebp: 'assets/img/cat-stacks-840.webp',
-    alt: 'Folded sweatshirts and fleece stacked on the shop shelves',
-    featured: true,
-    sortOrder: 20
+    id: 'floor-caps-flat', floor: true, categories: ['hats', 't-shirts'],
+    name: 'Trucker and snapback caps',
+    image: 'assets/img/floor-caps-flat-800.jpg',
+    imageWebp: 'assets/img/floor-caps-flat-800.webp',
+    imageSmall: 'assets/img/floor-caps-flat-400.jpg',
+    imageSmallWebp: 'assets/img/floor-caps-flat-400.webp',
+    alt: 'Two caps on display heads above a pair of graphic tees laid out on the counter',
+    featured: true, sortOrder: 20
   },
   {
-    id: 'preview-sneakers',
-    preview: true,
-    category: 'sneakers',
-    image: 'assets/img/prev-sneakers-420.jpg',
-    imageWebp: 'assets/img/prev-sneakers-420.webp',
-    alt: 'Sneakers displayed on a wooden shelf inside the store',
-    featured: true,
-    sortOrder: 30
+    id: 'floor-acc-flat', floor: true, category: 'accessories',
+    name: 'Wall clock, insulated bottle, stickers',
+    image: 'assets/img/floor-acc-flat-880.jpg',
+    imageWebp: 'assets/img/floor-acc-flat-880.webp',
+    imageSmall: 'assets/img/floor-acc-flat-400.jpg',
+    imageSmallWebp: 'assets/img/floor-acc-flat-400.webp',
+    alt: 'A branded wall clock, a red insulated bottle and a stack of red stickers on a white surface',
+    featured: true, sortOrder: 30
   },
   {
-    id: 'preview-new',
-    preview: true,
-    category: 'new-arrivals',
-    newArrival: true,
-    image: 'assets/img/cat-rack-430.jpg',
-    imageWebp: 'assets/img/cat-rack-430.webp',
-    alt: 'A rack of tees and jackets on the shop floor',
-    featured: true,
-    sortOrder: 40
+    id: 'floor-shorts-rack', floor: true, category: 'shorts',
+    name: 'Shorts on the rack',
+    image: 'assets/img/floor-shorts-rack-700.jpg',
+    imageWebp: 'assets/img/floor-shorts-rack-700.webp',
+    imageSmall: 'assets/img/floor-shorts-rack-400.jpg',
+    imageSmallWebp: 'assets/img/floor-shorts-rack-400.webp',
+    alt: 'Shorts hanging on a wooden rack: red side stripe, green leaf print, grey fleece and plain black',
+    featured: true, sortOrder: 40
   },
-  { id: 'preview-hats',        preview: true, category: 'hats',        sortOrder: 50 },
-  { id: 'preview-accessories', preview: true, category: 'accessories', sortOrder: 60 }
+  {
+    id: 'floor-hats-wall', floor: true, category: 'hats',
+    name: 'The hat wall',
+    image: 'assets/img/floor-hats-wall-864.jpg',
+    imageWebp: 'assets/img/floor-hats-wall-864.webp',
+    imageSmall: 'assets/img/floor-hats-wall-400.jpg',
+    imageSmallWebp: 'assets/img/floor-hats-wall-400.webp',
+    alt: 'Rows of caps racked on the wall, mesh trucker backs and embroidered fronts',
+    sortOrder: 50
+  },
+  {
+    id: 'floor-tees-wall', floor: true, categories: ['t-shirts', 'sneakers'],
+    name: 'Graphic tees on the wall',
+    image: 'assets/img/floor-tees-wall-800.jpg',
+    imageWebp: 'assets/img/floor-tees-wall-800.webp',
+    imageSmall: 'assets/img/floor-tees-wall-400.jpg',
+    imageSmallWebp: 'assets/img/floor-tees-wall-400.webp',
+    alt: 'Two oversized graphic tees hanging on the shop wall above a shelf of sneakers',
+    sortOrder: 60
+  },
+  {
+    id: 'floor-tees-rail', floor: true, category: 't-shirts',
+    name: 'Tee rail under the shelf lights',
+    image: 'assets/img/floor-tees-rail-620.jpg',
+    imageWebp: 'assets/img/floor-tees-rail-620.webp',
+    imageSmall: 'assets/img/floor-tees-rail-400.jpg',
+    imageSmallWebp: 'assets/img/floor-tees-rail-400.webp',
+    alt: 'A lit rail of graphic tees and jerseys hanging under a shelf inside the store',
+    sortOrder: 70
+  },
+  {
+    id: 'floor-fleece-shelf', floor: true, category: 'hoodies-sweatshirts',
+    name: 'Fleece folded on the shelves',
+    image: 'assets/img/floor-fleece-shelf-700.jpg',
+    imageWebp: 'assets/img/floor-fleece-shelf-700.webp',
+    imageSmall: 'assets/img/floor-fleece-shelf-400.jpg',
+    imageSmallWebp: 'assets/img/floor-fleece-shelf-400.webp',
+    alt: 'Folded hoodies and sweatshirts stacked on the wooden shelves',
+    sortOrder: 80
+  },
+  {
+    id: 'floor-fleece-rack', floor: true, category: 'hoodies-sweatshirts',
+    name: 'Crewnecks on the rack',
+    image: 'assets/img/floor-fleece-rack-560.jpg',
+    imageWebp: 'assets/img/floor-fleece-rack-560.webp',
+    imageSmall: 'assets/img/floor-fleece-rack-400.jpg',
+    imageSmallWebp: 'assets/img/floor-fleece-rack-400.webp',
+    alt: 'A rack of grey, red and black crewnecks and long sleeves hanging under a shelf of folded stock',
+    sortOrder: 85
+  },
+  {
+    id: 'floor-pants-rack', floor: true, category: 'pants',
+    name: 'Track pants and printed bottoms',
+    image: 'assets/img/floor-pants-rack-620.jpg',
+    imageWebp: 'assets/img/floor-pants-rack-620.webp',
+    imageSmall: 'assets/img/floor-pants-rack-400.jpg',
+    imageSmallWebp: 'assets/img/floor-pants-rack-400.webp',
+    alt: 'Hanging bottoms: leopard print, red track pants with white side stripes and a leaf print pair',
+    sortOrder: 90
+  },
+  {
+    id: 'floor-pants-fold', floor: true, category: 'pants',
+    name: 'Folded bottoms, back shelf',
+    image: 'assets/img/floor-pants-fold-620.jpg',
+    imageWebp: 'assets/img/floor-pants-fold-620.webp',
+    imageSmall: 'assets/img/floor-pants-fold-400.jpg',
+    imageSmallWebp: 'assets/img/floor-pants-fold-400.webp',
+    alt: 'Folded track pants and sweatpants stacked on the back shelves',
+    sortOrder: 100
+  },
+  {
+    id: 'floor-shorts-star', floor: true, category: 'shorts',
+    name: 'Star and P sweat shorts',
+    image: 'assets/img/floor-shorts-star-560.jpg',
+    imageWebp: 'assets/img/floor-shorts-star-560.webp',
+    imageSmall: 'assets/img/floor-shorts-star-400.jpg',
+    imageSmallWebp: 'assets/img/floor-shorts-star-400.webp',
+    alt: 'Black fleece shorts on a hanger with the All Star Players star and P embroidered on the leg',
+    sortOrder: 110
+  },
+  {
+    id: 'floor-sneakers', floor: true, category: 'sneakers',
+    name: 'Sneakers on the shelf',
+    image: 'assets/img/floor-sneakers-560.jpg',
+    imageWebp: 'assets/img/floor-sneakers-560.webp',
+    imageSmall: 'assets/img/floor-sneakers-400.jpg',
+    imageSmallWebp: 'assets/img/floor-sneakers-400.webp',
+    alt: 'A white pair and a printed pair of sneakers displayed on a wooden shelf below hanging tees',
+    sortOrder: 120
+  },
+  {
+    id: 'floor-acc-detail', floor: true, category: 'accessories',
+    name: 'Stickers, playing cards, small stuff',
+    image: 'assets/img/floor-acc-detail-560.jpg',
+    imageWebp: 'assets/img/floor-acc-detail-560.webp',
+    imageSmall: 'assets/img/floor-acc-detail-400.jpg',
+    imageSmallWebp: 'assets/img/floor-acc-detail-400.webp',
+    alt: 'Red box-logo stickers, a slim pocket knife, a deck of playing cards and the edge of a wall clock',
+    sortOrder: 130
+  }
 
-  /* ===== END OF TEMPORARY PREVIEW ENTRIES ===== */
+  /* ===== END OF FLOOR PHOTOS ===== */
 
-  /* Real products go here — see the template at the top of this file.
-     Remember the comma after the entry above once you start adding them. */
+  /* Real products go below here. Remember the comma after the entry above
+     once you start adding them. */
 
 ];
+
+/* Older copies of the site called this list ASP.products. Keep the old name
+   pointing at the same array so nothing breaks if something still uses it. */
+ASP.products = ASP.items;

@@ -1,19 +1,21 @@
 /* ==========================================================================
-   All Star Players — catalog engine
-   Renders every product card on the site (home Featured + Shop) from the data
-   in js/products.js, and drives the shop search / filter / sort controls.
-   Plain script, no build step, no dependencies.
+   All Star Players / catalog engine
+   Draws every card on the site from js/products.js, and runs the search,
+   filters and sorting on the shop page. Plain script, no dependencies.
    ========================================================================== */
 (function () {
   'use strict';
 
   var ASP = window.ASP || (window.ASP = {});
-  var PRODUCTS = ASP.products || [];
+  var ITEMS = ASP.items || ASP.products || [];
   var CATEGORIES = ASP.categories || [];
   var SETTINGS = ASP.settings || { currencySymbol: '$' };
 
-  /* the star from the All Star Players monogram, used as the empty-photo mark */
-  var STAR_PATH = 'M690.8 823.4L430.0 628.7L148.5 810.9L261.7 501.9L0.0 306.1L336.7 305.6L457.8 0.0L657.5 688.5Z';
+  /* the star from the monogram, used where a photo is missing */
+  var STAR = 'M690.8 823.4L430.0 628.7L148.5 810.9L261.7 501.9L0.0 306.1L336.7 305.6L457.8 0.0L657.5 688.5Z';
+
+  /* how wide a card photo actually renders, so the browser can pick a file */
+  var CARD_SIZES = '(max-width: 400px) 92vw, (max-width: 700px) 46vw, (max-width: 1080px) 30vw, 310px';
 
   /* ---------------------------------------------------------------- utils */
   function h(tag, cls, html) {
@@ -22,11 +24,21 @@
     if (html != null) n.innerHTML = html;
     return n;
   }
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
   function categoryName(slug) {
     for (var i = 0; i < CATEGORIES.length; i++) {
       if (CATEGORIES[i].slug === slug) return CATEGORIES[i].name;
     }
     return '';
+  }
+  /* every category slug an item belongs to */
+  function slugsOf(p) {
+    if (p.categories && p.categories.length) return p.categories;
+    return p.category ? [p.category] : [];
   }
   function money(v) {
     if (v == null || isNaN(v)) return '';
@@ -35,55 +47,67 @@
       minimumFractionDigits: n % 1 ? 2 : 0, maximumFractionDigits: 2
     });
   }
-  function esc(s) {
-    return String(s == null ? '' : s)
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
-  }
   ASP.money = money;
 
+  ASP.hasRealProducts = function () {
+    return ITEMS.some(function (p) { return !p.floor && !p.preview; });
+  };
+
   /* --------------------------------------------------------------- images */
-  function pictureFor(p, cls, alt) {
-    var wrap;
-    if (p.imageWebp) {
-      wrap = h('picture');
-      var src = document.createElement('source');
-      src.type = 'image/webp';
-      src.srcset = p.imageWebp;
-      wrap.appendChild(src);
-      wrap.appendChild(imgFor(p.image, cls, alt));
-      return wrap;
-    }
-    return imgFor(p.image, cls, alt);
+  /* Two widths per photo where a small crop exists, so phones do not pull
+     down the big file. The card box is a fixed 4:5 in CSS and the photo is
+     object-fit: cover, so nothing shifts while it loads. */
+  function srcsetFor(p, key, keySmall) {
+    var big = p[key], small = p[keySmall];
+    if (!big) return null;
+    if (!small) return { src: big, srcset: '' };
+    var bw = widthFromName(big), sw = widthFromName(small);
+    if (!bw || !sw || bw === sw) return { src: big, srcset: '' };
+    return { src: big, srcset: small + ' ' + sw + 'w, ' + big + ' ' + bw + 'w' };
   }
-  /* The card's media box is a fixed 4:5 aspect ratio in CSS, so these nominal
-     dimensions only exist to stop any layout shift before the file arrives. */
-  function imgFor(src, cls, alt) {
-    var img = new Image(800, 1000);
+  function widthFromName(path) {
+    var m = /-(\d+)\.(jpg|jpeg|png|webp)$/i.exec(path || '');
+    return m ? parseInt(m[1], 10) : 0;
+  }
+
+  function pictureFor(p, cls, alt) {
+    var jpg = srcsetFor(p, 'image', 'imageSmall');
+    if (!jpg) return null;
+    var webp = srcsetFor(p, 'imageWebp', 'imageSmallWebp');
+
+    var img = new Image();
     img.className = cls;
-    img.src = src;
+    img.src = jpg.src;
+    if (jpg.srcset) { img.srcset = jpg.srcset; img.sizes = CARD_SIZES; }
     img.alt = alt || '';
     img.loading = 'lazy';
     img.decoding = 'async';
-    return img;
+
+    if (!webp) return img;
+
+    var pic = h('picture');
+    var source = document.createElement('source');
+    source.type = 'image/webp';
+    source.srcset = webp.srcset || webp.src;
+    if (webp.srcset) source.sizes = CARD_SIZES;
+    pic.appendChild(source);
+    pic.appendChild(img);
+    return pic;
   }
 
   /* ----------------------------------------------------------------- card */
-  /* Builds one product card. Every state the real catalog will need is
-     supported here: hover image, badges, colours, sizes, sale price and the
-     sold-out treatment. Quick view can be wired later by listening for a click
-     on [data-product-id] — the card already carries the id. */
+  /* One card. Floor photos and real products share the layout: a floor photo
+     simply has no price, no sizes and no link, because it is a photograph of
+     the shop rather than a listing. */
   ASP.createCard = function (p) {
-    var isPreview = !!p.preview;
-    var card = h('article', 'card' + (isPreview ? ' card--preview' : '') + (p.soldOut ? ' is-soldout' : ''));
-    card.setAttribute('data-product-id', p.id || '');
-    card.setAttribute('data-category', p.category || '');
+    var isFloor = !!(p.floor || p.preview);
+    var card = h('article', 'card' + (isFloor ? ' card--floor' : '') + (p.soldOut ? ' is-soldout' : ''));
+    card.setAttribute('data-item-id', p.id || '');
 
-    /* ---- media ---- */
+    /* ---- photo ---- */
     var media = h('div', 'card__media');
 
     var badges = h('div', 'card__badges');
-    if (isPreview) badges.appendChild(h('span', 'badge badge--preview', 'Preview'));
     if (p.soldOut) badges.appendChild(h('span', 'badge badge--soldout', 'Sold Out'));
     if (p.newArrival && !p.soldOut) badges.appendChild(h('span', 'badge badge--new', 'New'));
     if (p.bestSeller) badges.appendChild(h('span', 'badge badge--best', 'Best Seller'));
@@ -93,43 +117,54 @@
     }
     if (badges.childNodes.length) media.appendChild(badges);
 
-    if (p.image) {
-      var hoverSrc = p.images && p.images.length ? p.images[0] : null;
-      var main = pictureFor(p, 'card__img card__img--main' + (hoverSrc ? ' has-alt' : ''), p.alt || p.name || '');
-      media.appendChild(main);
-      if (hoverSrc) {
-        var alt = imgFor(hoverSrc, 'card__img card__img--alt', '');
+    var shot = pictureFor(p, 'card__img card__img--main', p.alt || p.name || '');
+    if (shot) {
+      var hover = p.images && p.images.length ? p.images[0] : null;
+      if (hover) {
+        var mainImg = shot.tagName === 'PICTURE' ? shot.querySelector('img') : shot;
+        mainImg.className += ' has-alt';
+      }
+      media.appendChild(shot);
+      if (hover) {
+        var alt = new Image();
+        alt.className = 'card__img card__img--alt';
+        alt.src = hover;
+        alt.alt = '';
+        alt.loading = 'lazy';
+        alt.decoding = 'async';
         alt.setAttribute('aria-hidden', 'true');
         media.appendChild(alt);
       }
     } else {
       media.appendChild(h('div', 'card__placeholder',
-        '<svg viewBox="0 0 690.8 823.4" aria-hidden="true" focusable="false"><path fill="currentColor" d="' + STAR_PATH + '"/></svg>'));
+        '<svg viewBox="0 0 690.8 823.4" aria-hidden="true" focusable="false"><path fill="currentColor" d="' + STAR + '"/></svg>'));
     }
     if (p.soldOut) media.appendChild(h('div', 'card__soldout', '<span>Sold Out</span>'));
     card.appendChild(media);
 
-    /* ---- body ---- */
+    /* ---- words ---- */
     var body = h('div', 'card__body');
 
-    var brandLine = isPreview ? categoryName(p.category) : p.brand;
-    if (brandLine) body.appendChild(h('p', 'card__brand', esc(brandLine)));
+    /* A floor photo can honestly sit in more than one rack, so name them all
+       rather than picking one and looking wrong under the other filter. */
+    var top = isFloor
+      ? slugsOf(p).map(categoryName).filter(Boolean).join(' · ')
+      : p.brand;
+    if (top) body.appendChild(h('p', 'card__brand', esc(top)));
 
     var name = h('h3', 'card__name');
-    if (isPreview) {
-      name.textContent = 'Product details coming soon';
-    } else if (p.url) {
+    if (!isFloor && p.url) {
       name.innerHTML = '<a href="' + esc(p.url) + '">' + esc(p.name) + '</a>';
     } else {
       name.textContent = p.name || '';
     }
     body.appendChild(name);
 
-    if (!isPreview && p.description) body.appendChild(h('p', 'card__note', esc(p.description)));
+    if (p.description) body.appendChild(h('p', 'card__note', esc(p.description)));
 
-    if (!isPreview && p.colors && p.colors.length) {
+    if (p.colors && p.colors.length) {
       var colors = h('div', 'card__colors');
-      colors.setAttribute('aria-label', 'Available colours: ' + p.colors.map(function (c) { return c.name; }).join(', '));
+      colors.setAttribute('aria-label', 'Colors: ' + p.colors.map(function (c) { return c.name; }).join(', '));
       p.colors.slice(0, 5).forEach(function (c) {
         var sw = h('span', 'card__swatch');
         sw.style.background = c.hex || '#333';
@@ -140,70 +175,65 @@
       body.appendChild(colors);
     }
 
-    /* Preview entries get no price row at all — nothing about them is a
-       real listing, so nothing on the card should read like one. */
     var foot = h('div', 'card__foot');
-    var price = h('p', 'card__price');
-    if (isPreview) {
-      price = null;
+    if (isFloor) {
+      foot.appendChild(h('p', 'card__tag', 'In store'));
     } else if (p.price == null) {
-      price.className = 'card__price card__price--tbd';
-      price.textContent = 'Ask in store';
+      foot.appendChild(h('p', 'card__price card__price--tbd', 'Ask in store'));
     } else if (p.originalPrice && p.originalPrice > p.price) {
-      price.innerHTML = '<s>' + money(p.originalPrice) + '</s>' + money(p.price);
+      foot.appendChild(h('p', 'card__price', '<s>' + money(p.originalPrice) + '</s>' + money(p.price)));
     } else {
-      price.textContent = money(p.price);
+      foot.appendChild(h('p', 'card__price', money(p.price)));
     }
-    if (price) foot.appendChild(price);
 
-    if (!isPreview && p.sizes && p.sizes.length) {
+    if (p.sizes && p.sizes.length) {
       var sizes = h('div', 'card__sizes');
       p.sizes.slice(0, 4).forEach(function (s) { sizes.appendChild(h('span', 'card__size', esc(s))); });
       if (p.sizes.length > 4) sizes.appendChild(h('span', 'card__size', '+' + (p.sizes.length - 4)));
       foot.appendChild(sizes);
     }
-    if (foot.childNodes.length) body.appendChild(foot);
+    body.appendChild(foot);
     card.appendChild(body);
     return card;
   };
 
-  /* --------------------------------------------------- filtering + sorting */
+  /* --------------------------------------------------- filtering, sorting */
   function inCategory(p, slug) {
     if (!slug || slug === 'all') return true;
     for (var i = 0; i < CATEGORIES.length; i++) {
-      if (CATEGORIES[i].slug === slug && CATEGORIES[i].smart) {
-        if (p[CATEGORIES[i].smart]) return true;
-      }
+      if (CATEGORIES[i].slug === slug && CATEGORIES[i].smart) return !!p[CATEGORIES[i].smart];
     }
-    return p.category === slug;
+    return slugsOf(p).indexOf(slug) > -1;
   }
   function matchesQuery(p, q) {
     if (!q) return true;
-    var hay = [p.name, p.brand, p.description, categoryName(p.category),
-      (p.sizes || []).join(' '), (p.colors || []).map(function (c) { return c.name; }).join(' ')]
+    var hay = [p.name, p.brand, p.description, p.alt,
+      slugsOf(p).map(categoryName).join(' '),
+      (p.sizes || []).join(' '),
+      (p.colors || []).map(function (c) { return c.name; }).join(' ')]
       .join(' ').toLowerCase();
     return q.toLowerCase().split(/\s+/).every(function (t) { return hay.indexOf(t) > -1; });
   }
+
+  function num(v) { return typeof v === 'number' ? v : 9999; }
+  function byName(a, b) { return String(a.name || '').localeCompare(String(b.name || '')); }
+  function priceOf(p, dir) { return p.price == null ? dir * Infinity : p.price; }
+
   var SORTS = {
     featured: function (a, b) { return num(a.sortOrder) - num(b.sortOrder) || byName(a, b); },
     newest: function (a, b) {
       var d = (b.dateAdded || '').localeCompare(a.dateAdded || '');
-      if (d) return d;
-      return num(b.sortOrder) - num(a.sortOrder) || byName(a, b);
+      return d || num(b.sortOrder) - num(a.sortOrder) || byName(a, b);
     },
-    'price-asc': function (a, b) { return price(a, 1) - price(b, 1) || byName(a, b); },
-    'price-desc': function (a, b) { return price(b, -1) - price(a, -1) || byName(a, b); },
+    'price-asc': function (a, b) { return priceOf(a, 1) - priceOf(b, 1) || byName(a, b); },
+    'price-desc': function (a, b) { return priceOf(b, -1) - priceOf(a, -1) || byName(a, b); },
     'name-asc': byName
   };
-  function num(v) { return typeof v === 'number' ? v : 9999; }
-  function price(p, dir) { return p.price == null ? dir * Infinity : p.price; }
-  function byName(a, b) { return String(a.name || '').localeCompare(String(b.name || '')); }
 
   ASP.query = function (state) {
-    var list = PRODUCTS.filter(function (p) {
+    return ITEMS.filter(function (p) {
       return inCategory(p, state.category) && matchesQuery(p, state.q);
-    });
-    return list.sort(SORTS[state.sort] || SORTS.featured);
+    }).sort(SORTS[state.sort] || SORTS.featured);
   };
 
   /* ------------------------------------------------------- render helpers */
@@ -215,9 +245,10 @@
     spotlight(grid);
   }
 
-  /* restrained gold pool of light that tracks the pointer across a card */
+  /* a small pool of gold light that follows the pointer across a card */
   function spotlight(scope) {
-    if (!window.matchMedia || !window.matchMedia('(hover:hover) and (pointer:fine)').matches) return;
+    if (!window.matchMedia) return;
+    if (!window.matchMedia('(hover:hover) and (pointer:fine)').matches) return;
     if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
     scope.querySelectorAll('.card').forEach(function (card) {
       card.addEventListener('pointermove', function (e) {
@@ -228,21 +259,16 @@
     });
   }
 
-  ASP.hasRealProducts = function () {
-    return PRODUCTS.some(function (p) { return !p.preview; });
-  };
-
-  /* ------------------------------------------------------- home: featured */
+  /* --------------------------------------------------- home: the row of 4 */
   function initFeatured() {
     var grid = document.querySelector('[data-featured-grid]');
     if (!grid) return;
     var limit = parseInt(grid.getAttribute('data-limit'), 10) || 4;
-    var list = PRODUCTS.filter(function (p) { return p.featured; });
-    if (!list.length) list = PRODUCTS.slice(0);
-    list = list.sort(SORTS.featured).slice(0, limit);
-    paint(grid, list);
+    var list = ITEMS.filter(function (p) { return p.featured; });
+    if (!list.length) list = ITEMS.slice(0);
+    paint(grid, list.sort(SORTS.featured).slice(0, limit));
 
-    var note = document.querySelector('[data-featured-note]');
+    var note = document.querySelector('[data-floor-note]');
     if (note && ASP.hasRealProducts()) note.hidden = true;
   }
 
@@ -260,9 +286,19 @@
     var activeEl = document.querySelector('[data-active-filters]');
     var clearBtns = document.querySelectorAll('[data-clear-filters]');
     var noResults = document.querySelector('[data-no-results]');
-    var previewFlag = document.querySelector('[data-preview-flag]');
-    var catalogNote = document.querySelector('[data-catalog-note]');
+    var floorFlag = document.querySelector('[data-floor-note]');
     var filterBtn = document.querySelector('[data-filter-open]');
+
+    /* Drop the sort options that cannot do anything yet. A control that looks
+       live but changes nothing is worse than no control. */
+    if (sortSelect) {
+      var hasPrices = ITEMS.some(function (p) { return typeof p.price === 'number'; });
+      var hasDates = ITEMS.some(function (p) { return !!p.dateAdded; });
+      Array.prototype.slice.call(sortSelect.options).forEach(function (o) {
+        var priceSort = o.value.indexOf('price') === 0;
+        if ((priceSort && !hasPrices) || (o.value === 'newest' && !hasDates)) o.remove();
+      });
+    }
 
     var params = new URLSearchParams(window.location.search);
     var state = {
@@ -270,15 +306,15 @@
       category: params.get('category') || 'all',
       sort: params.get('sort') || 'featured'
     };
-    if (!CATEGORIES.some(function (c) { return c.slug === state.category; })) {
-      if (state.category !== 'all') state.category = 'all';
+    if (!CATEGORIES.some(function (c) { return c.slug === state.category; })) state.category = 'all';
+    if (!SORTS[state.sort] || (sortSelect && !sortSelect.querySelector('[value="' + state.sort + '"]'))) {
+      state.sort = 'featured';
     }
-    if (!SORTS[state.sort]) state.sort = 'featured';
 
-    /* --- build the category chips (desktop bar + mobile drawer) --- */
+    /* --- category chips, on the bar and inside the phone drawer --- */
     chipWraps.forEach(function (wrap) {
       var frag = document.createDocumentFragment();
-      frag.appendChild(chip({ slug: 'all', name: 'All' }));
+      frag.appendChild(chip({ slug: 'all', name: 'Everything' }));
       CATEGORIES.forEach(function (c) { frag.appendChild(chip(c)); });
       wrap.appendChild(frag);
     });
@@ -327,7 +363,7 @@
     });
     if (form) form.addEventListener('submit', function (e) { e.preventDefault(); });
 
-    /* --- mobile drawer --- */
+    /* --- the filter drawer on phones --- */
     var drawer = document.querySelector('[data-drawer]');
     function openDrawer() {
       if (!drawer) return;
@@ -359,7 +395,7 @@
       b.addEventListener('click', closeDrawer);
     });
 
-    /* --- render --- */
+    /* --- draw --- */
     function render(animate) {
       var list = ASP.query(state);
 
@@ -370,19 +406,16 @@
         commit(list);
       }
 
-      /* chips: pressed state + live counts */
       document.querySelectorAll('.chip').forEach(function (b) {
         var slug = b.getAttribute('data-category');
-        var on = slug === state.category;
-        b.setAttribute('aria-pressed', on ? 'true' : 'false');
+        b.setAttribute('aria-pressed', slug === state.category ? 'true' : 'false');
         var c = b.querySelector('.chip__count');
         if (c) {
-          var n = PRODUCTS.filter(function (p) { return inCategory(p, slug) && matchesQuery(p, state.q); }).length;
+          var n = ITEMS.filter(function (p) { return inCategory(p, slug) && matchesQuery(p, state.q); }).length;
           c.textContent = n ? n : '';
         }
       });
 
-      /* active filter pills */
       if (activeEl) {
         activeEl.innerHTML = '';
         if (state.category !== 'all') activeEl.appendChild(pill(categoryName(state.category), function () {
@@ -398,13 +431,13 @@
       if (searchClear) searchClear.classList.toggle('is-visible', !!state.q);
 
       if (countEl) {
-        var noun = ASP.hasRealProducts() ? 'products' : 'preview entries';
+        var noun = ASP.hasRealProducts() ? 'products' : 'photos';
         countEl.innerHTML = list.length
-          ? 'Showing <b>' + list.length + '</b> of ' + PRODUCTS.length + ' ' + noun
-          : 'No matches';
+          ? 'Showing <b>' + list.length + '</b> of ' + ITEMS.length + ' ' + noun
+          : 'Nothing matches';
       }
       if (noResults) noResults.hidden = list.length > 0;
-      if (previewFlag) previewFlag.hidden = !list.some(function (p) { return p.preview; });
+      if (floorFlag) floorFlag.hidden = !list.some(function (p) { return p.floor || p.preview; });
 
       syncUrl();
     }
@@ -434,7 +467,6 @@
       window.history.replaceState(null, '', url.pathname + (s.toString() ? '?' + s.toString() : '') + url.hash);
     }
 
-    if (catalogNote && ASP.hasRealProducts()) catalogNote.hidden = true;
     render(false);
   }
 

@@ -3,25 +3,25 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>All Star Players — Queens Streetwear Since 2002</title>
-<meta name="description" content="Streetwear boutique on 37th Ave in Queens, open since 2002. New drops go up as they land, and everything we carry is bought direct from the brands.">
+<title>All Star Players | Queens Streetwear Since 2002</title>
+<meta name="description" content="Streetwear boutique at 96-03 37th Ave in Queens, open since 2002. Tees, fleece, bottoms, sneakers, hats and accessories, all bought direct from the brands.">
 <meta name="theme-color" content="#0A0A0A">
 <meta name="author" content="All Star Players">
 
-<!-- Open Graph / social. When the final domain is known, swap the two relative
-     image paths below for absolute ones (https://yourdomain.com/assets/…). -->
+<!-- Open Graph. Once the final domain is set, swap the two image paths below
+     for absolute ones (https://yourdomain.com/assets/...). -->
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="All Star Players">
-<meta property="og:title" content="All Star Players — Queens Streetwear Since 2002">
-<meta property="og:description" content="New drops and everyday staples, nothing on the racks that isn't real. 96-03 37th Ave, Queens, NY.">
+<meta property="og:title" content="All Star Players | Queens Streetwear Since 2002">
+<meta property="og:description" content="On 37th Ave in Queens since 2002. Everything on the racks is real.">
 <meta property="og:image" content="assets/brand/og-image.jpg">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
-<meta property="og:image:alt" content="The illuminated All Star Players storefront sign in Queens, New York">
+<meta property="og:image:alt" content="The lit All Star Players storefront sign on 37th Avenue in Queens, New York">
 <meta property="og:locale" content="en_US">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="All Star Players — Queens Streetwear Since 2002">
-<meta name="twitter:description" content="New drops and everyday staples, nothing on the racks that isn't real.">
+<meta name="twitter:title" content="All Star Players | Queens Streetwear Since 2002">
+<meta name="twitter:description" content="On 37th Ave in Queens since 2002. Everything on the racks is real.">
 <meta name="twitter:image" content="assets/brand/og-image.jpg">
 
 <link rel="icon" href="assets/brand/favicon.ico" sizes="32x32">
@@ -33,7 +33,11 @@
 <link rel="preload" as="font" type="font/woff2" href="assets/fonts/asp-display.woff2" crossorigin>
 <link rel="preload" as="font" type="font/woff2" href="assets/fonts/asp-sans-400.woff2" crossorigin>
 <link rel="preload" as="font" type="font/woff2" href="assets/fonts/asp-sans-700.woff2" crossorigin>
-<link rel="preload" as="image" href="assets/img/hero-storefront-780.webp" type="image/webp" imagesrcset="assets/img/hero-storefront-520.webp 520w, assets/img/hero-storefront-780.webp 780w, assets/img/hero-storefront-946.webp 946w" imagesizes="(max-width: 980px) 100vw, min(44vw, 520px)">
+<!-- The still behind the header is what people see first, so it loads first.
+     The video itself is fetched later, by js/main.js. -->
+<link rel="preload" as="image" href="assets/img/hero-poster-1000.webp" type="image/webp"
+      imagesrcset="assets/img/hero-poster-640.webp 640w, assets/img/hero-poster-1000.webp 1000w, assets/img/hero-poster-1600.webp 1600w"
+      imagesizes="100vw" fetchpriority="high">
 
 <link rel="stylesheet" href="css/base.css">
 <link rel="stylesheet" href="css/catalog.css">
@@ -63,7 +67,7 @@
 </script>
 </head>
 
-<body>
+<body class="has-cta">
 <a class="skip-link" href="#main">Skip to content</a>
 
 <!-- ══════════════════════════════════════════════ announcement ══════ -->
@@ -80,7 +84,7 @@
 <!-- ══════════════════════════════════════════════════ header ════════ -->
 <header class="header" data-header>
   <div class="header__inner">
-    <a class="brand" href="index.html" aria-label="All Star Players — home">
+    <a class="brand" href="index.html" aria-label="All Star Players, home">
       <svg class="brand__mark" viewBox="0 0 1000 823.4" aria-hidden="true" focusable="false">
         <path fill="currentColor" d="M690.8 823.4L430.0 628.7L148.5 810.9L261.7 501.9L0.0 306.1L336.7 305.6L457.8 0.0L657.5 688.5Z"/>
         <path fill="currentColor" d="M844.2 478.0L658.0 475.5L642.3 473.2L634.5 467.1L630.1 456.4L603.8 363.0L597.2 335.0L597.2 329.0L599.0 325.0L605.7 321.3L618.4 320.1L762.2 321.5L778.7 319.3L793.8 314.4L804.3 308.3L814.0 300.0L821.0 291.2L826.2 281.1L830.0 267.7L832.3 249.3L832.7 233.4L830.8 220.4L824.3 202.7L814.0 188.8L800.1 179.2L781.6 172.8L764.6 170.8L583.9 165.2L572.1 163.9L564.8 160.8L559.4 154.4L553.8 140.7L515.4 21.0L514.3 12.9L515.8 8.0L520.1 4.8L527.0 3.4L560.6 2.8L839.1 8.6L863.3 10.9L895.6 19.4L924.3 32.8L950.8 53.4L972.2 79.0L982.1 96.1L990.6 116.6L997.4 141.5L1000.0 160.3L996.0 323.1L993.7 345.7L989.6 363.7L979.9 388.5L969.8 406.7L954.5 426.7L937.4 442.7L918.6 455.1L891.7 466.9L872.0 472.8Z"/>
@@ -102,9 +106,9 @@
         <li><a class="nav__link" href="index.html" aria-current="page">Home</a></li>
         <li><a class="nav__link" href="shop.html">Shop</a></li>
         <li><a class="nav__link" href="#about">About</a></li>
-        <li><a class="nav__link" href="#visit">Visit Us</a></li>
+        <li><a class="nav__link" href="#visit">Visit</a></li>
       </ul>
-      <a class="btn btn--gold btn--sm nav__cta" href="shop.html">Shop Now</a>
+      <a class="btn btn--gold btn--sm nav__cta" href="shop.html">See the Floor</a>
       <div class="nav__meta">
         <a href="tel:+17185051038">(718) 505-1038</a>
         <a href="https://www.instagram.com/allstarplayers/" target="_blank" rel="noopener">@allstarplayers</a>
@@ -116,18 +120,34 @@
 
 <main id="main">
 
-  <!-- ═════════════════════════════════════════════════ hero ═════════ -->
+  <!-- ═══════════════════════════════════════ hero, over the video ═══ -->
   <section class="hero" data-hero aria-labelledby="hero-title">
-    <div class="hero__backdrop" aria-hidden="true">
-      <picture>
-        <source type="image/webp" srcset="assets/img/sign-560.webp 560w, assets/img/sign-830.webp 830w" sizes="100vw">
-        <img src="assets/img/sign-830.jpg" srcset="assets/img/sign-560.jpg 560w, assets/img/sign-830.jpg 830w" sizes="100vw" alt="" width="830" height="467" decoding="async">
+    <div class="hero__media">
+      <!-- Shows first, stays put if the video never loads. -->
+      <picture class="hero__poster">
+        <source type="image/webp" sizes="100vw"
+                srcset="assets/img/hero-poster-640.webp 640w, assets/img/hero-poster-1000.webp 1000w, assets/img/hero-poster-1600.webp 1600w">
+        <img src="assets/img/hero-poster-1000.jpg" sizes="100vw"
+             srcset="assets/img/hero-poster-640.jpg 640w, assets/img/hero-poster-1000.jpg 1000w, assets/img/hero-poster-1600.jpg 1600w"
+             width="1600" height="900" fetchpriority="high" decoding="async"
+             alt="The lit All Star Players sign above the shopfront on 37th Avenue in Queens">
       </picture>
+
+      <!-- No src on purpose. js/main.js picks the file and starts it, so
+           nothing downloads on a slow line, a data saver, or for anyone who
+           has asked for reduced motion. -->
+      <video class="hero__video" data-hero-video
+             muted playsinline loop preload="none" disablepictureinpicture
+             data-src-wide="assets/video/store-tour-1280.mp4"
+             data-src-narrow="assets/video/store-tour-854.mp4"
+             aria-label="A walk through the All Star Players store, from the sign outside to the racks inside"></video>
+
+      <span class="hero__scrim" aria-hidden="true"></span>
     </div>
 
     <div class="wrap hero__inner">
       <div class="hero__copy">
-        <p class="eyebrow">Est. 2002 · Queens, New York</p>
+        <p class="eyebrow">96-03 37th Ave · Queens, NY</p>
 
         <h1 class="hero__title reveal-lines" id="hero-title">
           <span class="line"><span>Always</span></span>
@@ -135,42 +155,47 @@
           <span class="line"><span>the <em>Game.</em></span></span>
         </h1>
 
-        <p class="lede hero__lede">New drops and everyday staples. Nothing on the racks that isn't real.</p>
+        <p class="lede hero__lede">Streetwear boutique in Queens, open since 2002. Everything on these racks is real.</p>
 
         <div class="hero__actions">
           <a class="btn btn--gold" href="shop.html">
-            Shop Now
+            See the Floor
             <svg class="btn__ico" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M1 8h13M9 3l5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.7"/></svg>
           </a>
-          <a class="btn btn--ghost" href="#about">Our Story</a>
+          <a class="btn btn--ghost" href="#visit">Find the Store</a>
         </div>
 
         <ul class="hero__meta">
-          <li>96-03 37th Ave, Queens NY</li>
           <li><a href="tel:+17185051038">(718) 505-1038</a></li>
           <li><a href="https://www.instagram.com/allstarplayers/" target="_blank" rel="noopener">@allstarplayers</a></li>
+          <li>Est. 2002</li>
         </ul>
-      </div>
-
-      <div class="hero__visual">
-        <figure class="hero__frame">
-          <div class="hero__shot">
-            <picture>
-              <source type="image/webp" srcset="assets/img/hero-storefront-520.webp 520w, assets/img/hero-storefront-780.webp 780w, assets/img/hero-storefront-946.webp 946w" sizes="(max-width: 980px) 100vw, min(44vw, 520px)">
-              <img src="assets/img/hero-storefront-780.jpg"
-                   srcset="assets/img/hero-storefront-520.jpg 520w, assets/img/hero-storefront-780.jpg 780w, assets/img/hero-storefront-946.jpg 946w"
-                   sizes="(max-width: 980px) 100vw, min(44vw, 520px)"
-                   width="946" height="1261" fetchpriority="high" decoding="async"
-                   alt="The All Star Players storefront at night, its gold star-and-P sign lit above the windows">
-            </picture>
-            <span class="hero__glow" aria-hidden="true"></span>
-          </div>
-          <figcaption class="hero__caption">96-03 37th Ave. Look for the star.</figcaption>
-        </figure>
       </div>
     </div>
 
-    <a class="hero__scroll" href="#featured" aria-label="Scroll to featured products">
+    <!-- Unhidden by js/main.js once there is something to control. -->
+    <div class="hero__controls" data-hero-controls hidden>
+      <button class="ctl" type="button" data-hero-play aria-pressed="false" aria-label="Play the store video">
+        <span class="ctl__ico" aria-hidden="true">
+          <svg class="ctl__ico--play" viewBox="0 0 14 14" focusable="false"><path d="M3 1.6l9 5.4-9 5.4z" fill="currentColor"/></svg>
+          <svg class="ctl__ico--pause" viewBox="0 0 14 14" focusable="false"><path d="M3.2 1.8h2.6v10.4H3.2zM8.2 1.8h2.6v10.4H8.2z" fill="currentColor"/></svg>
+        </span>
+        <span class="ctl__label" data-label>Play</span>
+      </button>
+
+      <button class="ctl" type="button" data-hero-sound aria-pressed="false" aria-label="Turn the sound on">
+        <span class="ctl__ico" aria-hidden="true">
+          <svg viewBox="0 0 16 16" focusable="false">
+            <path d="M3 6h2.4L9 2.9v10.2L5.4 10H3z" fill="currentColor"/>
+            <path class="ctl__wave" d="M11.3 5.6a3.4 3.4 0 0 1 0 4.8M13.3 3.6a6.2 6.2 0 0 1 0 8.8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+            <path class="ctl__slash" d="M11.6 5.6l3.6 4.8M15.2 5.6l-3.6 4.8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+          </svg>
+        </span>
+        <span class="ctl__label" data-label>Sound off</span>
+      </button>
+    </div>
+
+    <a class="hero__scroll" href="#floor" aria-label="Skip down to what is in the store">
       <span>Scroll</span><span class="bar" aria-hidden="true"></span>
     </a>
   </section>
@@ -195,36 +220,36 @@
     </div>
   </div>
 
-  <!-- ═════════════════════════════════════════════ featured ═════════ -->
-  <section class="section" id="featured" aria-labelledby="featured-title">
+  <!-- ═══════════════════════════════════════════ on the floor ═══════ -->
+  <section class="section" id="floor" aria-labelledby="floor-title">
     <div class="wrap">
       <div class="section-head" data-reveal>
         <div class="section-head__text">
           <p class="eyebrow">On the floor</p>
-          <h2 id="featured-title" data-foil class="foil">Featured</h2>
-          <p class="lede" style="margin-top:18px">What just came in, and what keeps moving.</p>
+          <h2 id="floor-title" data-foil class="foil">In the store now</h2>
+          <p class="lede" style="margin-top:18px">Shot in the shop, not pulled off a catalog.</p>
         </div>
         <a class="link-gold" href="shop.html">
-          Shop All
+          See Everything
           <svg class="btn__ico" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M1 8h13M9 3l5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.7"/></svg>
         </a>
       </div>
 
-      <!-- Cards are rendered from js/products.js — see that file to add products. -->
+      <!-- Cards come from js/products.js. That file is the only place to edit. -->
       <div class="product-grid product-grid--featured" data-featured-grid data-limit="4"></div>
 
       <noscript>
-        <p class="lede" style="margin-top:24px">Turn JavaScript on to browse the racks, or come see them in person at 96-03 37th Ave, Queens, NY 11368.</p>
+        <p class="lede" style="margin-top:24px">Turn JavaScript on to browse the racks, or come see them at 96-03 37th Ave, Queens, NY 11368.</p>
       </noscript>
 
-      <p class="preview-flag" data-featured-note style="margin-top:26px">
-        <b>Placeholder</b>
-        <span>We're still shooting the real pieces. Photos, names and prices land here.</span>
+      <p class="floor-flag" data-floor-note>
+        <b>Photos, not listings</b>
+        <span>No sizes or prices online yet. Call <a href="tel:+17185051038">(718) 505-1038</a> or come by and ask.</span>
       </p>
 
-      <div class="featured__actions">
+      <div class="floor__actions">
         <a class="btn btn--gold" href="shop.html">
-          Shop Now
+          See Everything
           <svg class="btn__ico" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M1 8h13M9 3l5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.7"/></svg>
         </a>
       </div>
@@ -237,29 +262,17 @@
       <div class="section-head" data-reveal>
         <div class="section-head__text">
           <p class="eyebrow">What we carry</p>
-          <h2 id="cats-title">Shop by Category</h2>
+          <h2 id="cats-title">Shop by category</h2>
         </div>
-        <p class="sect-index">Start anywhere</p>
+        <p class="sect-index">Pick a rack</p>
       </div>
 
       <div class="cat-grid">
-        <a class="tile tile--new" href="shop.html?category=new-arrivals" data-reveal>
+        <a class="tile tile--tees" href="shop.html?category=t-shirts" data-reveal>
           <span class="tile__img" aria-hidden="true">
             <picture>
-              <source type="image/webp" srcset="assets/img/cat-rack-430.webp">
-              <img src="assets/img/cat-rack-430.jpg" alt="" width="430" height="649" loading="lazy" decoding="async">
-            </picture>
-          </span>
-          <span class="tile__label"><span class="tile__name">New Arrivals</span>
-            <svg class="tile__arrow" viewBox="0 0 26 26" aria-hidden="true" focusable="false"><path d="M7 19L19 7M9 7h10v10" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
-          </span>
-        </a>
-
-        <a class="tile tile--tees" href="shop.html?category=t-shirts" data-reveal data-reveal-delay="1">
-          <span class="tile__img" aria-hidden="true">
-            <picture>
-              <source type="image/webp" srcset="assets/img/cat-tees-420.webp 420w, assets/img/cat-tees-780.webp 780w" sizes="(max-width: 600px) 50vw, (max-width: 1000px) 34vw, 30vw">
-              <img src="assets/img/cat-tees-780.jpg" srcset="assets/img/cat-tees-420.jpg 420w, assets/img/cat-tees-780.jpg 780w" sizes="(max-width: 600px) 50vw, (max-width: 1000px) 34vw, 30vw" alt="" width="780" height="720" loading="lazy" decoding="async">
+              <source type="image/webp" srcset="assets/img/cat-tees-420.webp 420w, assets/img/cat-tees-780.webp 780w" sizes="(max-width: 600px) 50vw, (max-width: 1000px) 50vw, 34vw">
+              <img src="assets/img/cat-tees-780.jpg" srcset="assets/img/cat-tees-420.jpg 420w, assets/img/cat-tees-780.jpg 780w" sizes="(max-width: 600px) 50vw, (max-width: 1000px) 50vw, 34vw" alt="" width="780" height="720" loading="lazy" decoding="async">
             </picture>
           </span>
           <span class="tile__label"><span class="tile__name">T-Shirts</span>
@@ -267,20 +280,26 @@
           </span>
         </a>
 
-        <a class="tile tile--text tile--best" href="shop.html?category=best-sellers" data-reveal data-reveal-delay="2">
-          <span class="tile__label"><span class="tile__name">Best Sellers</span>
+        <a class="tile tile--hat" href="shop.html?category=hats" data-reveal data-reveal-delay="1">
+          <span class="tile__img" aria-hidden="true">
+            <picture>
+              <source type="image/webp" srcset="assets/img/cat-hats-420.webp 420w, assets/img/cat-hats-840.webp 840w" sizes="(max-width: 600px) 50vw, (max-width: 1000px) 50vw, 34vw">
+              <img src="assets/img/cat-hats-840.jpg" srcset="assets/img/cat-hats-420.jpg 420w, assets/img/cat-hats-840.jpg 840w" sizes="(max-width: 600px) 50vw, (max-width: 1000px) 50vw, 34vw" alt="" width="840" height="473" loading="lazy" decoding="async">
+            </picture>
+          </span>
+          <span class="tile__label"><span class="tile__name">Hats</span>
             <svg class="tile__arrow" viewBox="0 0 26 26" aria-hidden="true" focusable="false"><path d="M7 19L19 7M9 7h10v10" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
           </span>
         </a>
 
-        <a class="tile tile--snk" href="shop.html?category=sneakers" data-reveal data-reveal-delay="3">
+        <a class="tile tile--acc" href="shop.html?category=accessories" data-reveal data-reveal-delay="2">
           <span class="tile__img" aria-hidden="true">
             <picture>
-              <source type="image/webp" srcset="assets/img/cat-sneakers-420.webp 420w, assets/img/cat-sneakers-660.webp 660w" sizes="(max-width: 600px) 50vw, (max-width: 1000px) 34vw, 30vw">
-              <img src="assets/img/cat-sneakers-660.jpg" srcset="assets/img/cat-sneakers-420.jpg 420w, assets/img/cat-sneakers-660.jpg 660w" sizes="(max-width: 600px) 50vw, (max-width: 1000px) 34vw, 30vw" alt="" width="660" height="360" loading="lazy" decoding="async">
+              <source type="image/webp" srcset="assets/img/cat-accessories-420.webp 420w, assets/img/cat-accessories-840.webp 840w" sizes="(max-width: 600px) 50vw, (max-width: 1000px) 50vw, 34vw">
+              <img src="assets/img/cat-accessories-840.jpg" srcset="assets/img/cat-accessories-420.jpg 420w, assets/img/cat-accessories-840.jpg 840w" sizes="(max-width: 600px) 50vw, (max-width: 1000px) 50vw, 34vw" alt="" width="840" height="840" loading="lazy" decoding="async">
             </picture>
           </span>
-          <span class="tile__label"><span class="tile__name">Sneakers</span>
+          <span class="tile__label"><span class="tile__name">Accessories</span>
             <svg class="tile__arrow" viewBox="0 0 26 26" aria-hidden="true" focusable="false"><path d="M7 19L19 7M9 7h10v10" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
           </span>
         </a>
@@ -288,8 +307,8 @@
         <a class="tile tile--hood" href="shop.html?category=hoodies-sweatshirts" data-reveal>
           <span class="tile__img" aria-hidden="true">
             <picture>
-              <source type="image/webp" srcset="assets/img/cat-stacks-420.webp 420w, assets/img/cat-stacks-840.webp 840w" sizes="(max-width: 600px) 50vw, (max-width: 1000px) 34vw, 30vw">
-              <img src="assets/img/cat-stacks-840.jpg" srcset="assets/img/cat-stacks-420.jpg 420w, assets/img/cat-stacks-840.jpg 840w" sizes="(max-width: 600px) 50vw, (max-width: 1000px) 34vw, 30vw" alt="" width="840" height="610" loading="lazy" decoding="async">
+              <source type="image/webp" srcset="assets/img/cat-hoodies-420.webp 420w, assets/img/cat-hoodies-660.webp 660w" sizes="(max-width: 600px) 50vw, (max-width: 1000px) 50vw, 34vw">
+              <img src="assets/img/cat-hoodies-660.jpg" srcset="assets/img/cat-hoodies-420.jpg 420w, assets/img/cat-hoodies-660.jpg 660w" sizes="(max-width: 600px) 50vw, (max-width: 1000px) 50vw, 34vw" alt="" width="660" height="430" loading="lazy" decoding="async">
             </picture>
           </span>
           <span class="tile__label"><span class="tile__name">Hoodies &amp; Sweatshirts</span>
@@ -297,32 +316,38 @@
           </span>
         </a>
 
-        <a class="tile tile--text tile--jkt" href="shop.html?category=jackets" data-reveal data-reveal-delay="1">
-          <span class="tile__label"><span class="tile__name">Jackets</span>
-            <svg class="tile__arrow" viewBox="0 0 26 26" aria-hidden="true" focusable="false"><path d="M7 19L19 7M9 7h10v10" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
+        <a class="tile tile--pnt" href="shop.html?category=pants" data-reveal data-reveal-delay="1">
+          <span class="tile__img" aria-hidden="true">
+            <picture>
+              <source type="image/webp" srcset="assets/img/cat-pants-430.webp 430w, assets/img/cat-pants-700.webp 700w" sizes="(max-width: 600px) 50vw, (max-width: 1000px) 50vw, 34vw">
+              <img src="assets/img/cat-pants-700.jpg" srcset="assets/img/cat-pants-430.jpg 430w, assets/img/cat-pants-700.jpg 700w" sizes="(max-width: 600px) 50vw, (max-width: 1000px) 50vw, 34vw" alt="" width="700" height="440" loading="lazy" decoding="async">
+            </picture>
           </span>
-        </a>
-
-        <a class="tile tile--text tile--pnt" href="shop.html?category=pants" data-reveal data-reveal-delay="2">
           <span class="tile__label"><span class="tile__name">Pants</span>
             <svg class="tile__arrow" viewBox="0 0 26 26" aria-hidden="true" focusable="false"><path d="M7 19L19 7M9 7h10v10" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
           </span>
         </a>
 
-        <a class="tile tile--text tile--shr" href="shop.html?category=shorts" data-reveal>
+        <a class="tile tile--shr" href="shop.html?category=shorts" data-reveal data-reveal-delay="2">
+          <span class="tile__img" aria-hidden="true">
+            <picture>
+              <source type="image/webp" srcset="assets/img/cat-shorts-430.webp 430w, assets/img/cat-shorts-860.webp 860w" sizes="(max-width: 600px) 50vw, (max-width: 1000px) 50vw, 34vw">
+              <img src="assets/img/cat-shorts-860.jpg" srcset="assets/img/cat-shorts-430.jpg 430w, assets/img/cat-shorts-860.jpg 860w" sizes="(max-width: 600px) 50vw, (max-width: 1000px) 50vw, 34vw" alt="" width="860" height="625" loading="lazy" decoding="async">
+            </picture>
+          </span>
           <span class="tile__label"><span class="tile__name">Shorts</span>
             <svg class="tile__arrow" viewBox="0 0 26 26" aria-hidden="true" focusable="false"><path d="M7 19L19 7M9 7h10v10" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
           </span>
         </a>
 
-        <a class="tile tile--text tile--hat" href="shop.html?category=hats" data-reveal data-reveal-delay="1">
-          <span class="tile__label"><span class="tile__name">Hats</span>
-            <svg class="tile__arrow" viewBox="0 0 26 26" aria-hidden="true" focusable="false"><path d="M7 19L19 7M9 7h10v10" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
+        <a class="tile tile--snk" href="shop.html?category=sneakers" data-reveal data-reveal-delay="3">
+          <span class="tile__img" aria-hidden="true">
+            <picture>
+              <source type="image/webp" srcset="assets/img/cat-sneakers-420.webp 420w, assets/img/cat-sneakers-740.webp 740w" sizes="(max-width: 600px) 50vw, (max-width: 1000px) 50vw, 34vw">
+              <img src="assets/img/cat-sneakers-740.jpg" srcset="assets/img/cat-sneakers-420.jpg 420w, assets/img/cat-sneakers-740.jpg 740w" sizes="(max-width: 600px) 50vw, (max-width: 1000px) 50vw, 34vw" alt="" width="740" height="430" loading="lazy" decoding="async">
+            </picture>
           </span>
-        </a>
-
-        <a class="tile tile--text tile--acc" href="shop.html?category=accessories" data-reveal data-reveal-delay="2">
-          <span class="tile__label"><span class="tile__name">Accessories</span>
+          <span class="tile__label"><span class="tile__name">Sneakers</span>
             <svg class="tile__arrow" viewBox="0 0 26 26" aria-hidden="true" focusable="false"><path d="M7 19L19 7M9 7h10v10" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
           </span>
         </a>
@@ -341,32 +366,77 @@
                  srcset="assets/img/interior-620.jpg 620w, assets/img/interior-1000.jpg 1000w"
                  sizes="(max-width: 900px) 92vw, 40vw"
                  width="1000" height="1317" loading="lazy" decoding="async"
-                 alt="Inside All Star Players: graphic tees on the wall, folded fleece on the shelves and racks of tees along the floor">
+                 alt="Inside the store: graphic tees hung on the wall, folded fleece on the shelves and a rack of tees along the floor">
           </picture>
         </div>
         <p class="about__stamp"><b>2002</b><span>Established</span></p>
       </div>
 
       <div class="about__copy" data-reveal="right">
-        <p class="eyebrow">Our Story</p>
-        <h2 id="about-title">Ahead of the game since 2002.</h2>
+        <p class="eyebrow">The store</p>
+        <h2 id="about-title">On 37th Ave since 2002.</h2>
 
         <div class="body-copy">
-          <p>We've been doing this in Queens since 2002. Long enough to know what this neighborhood wears, and to keep the racks stocked with it. New drops. Pieces you won't see on everybody. The stuff you reach for every day.</p>
-          <p>Everything in here is <strong>authentic</strong>. We buy through direct accounts and relationships we built with the brands ourselves, and we've never done it another way. That trust is the business.</p>
-          <p>Now we're putting the shop online. What's on the floor will be on the site, so you can see what's new and pick it up from wherever you are.</p>
+          <p>Same block, same door, since 2002. Long enough to know what this neighborhood wears and to keep the racks stocked with it.</p>
+          <p>The floor moves. New drops, pieces you won't see on everybody, and the staples you reach for on a normal day. What sells, we get more of. What sits doesn't come back.</p>
+          <p>Everything is <strong>bought direct from the brands</strong>. That's how it's worked here since day one, and a website doesn't change it.</p>
         </div>
 
         <dl class="about__facts">
-          <div><dt>Where</dt><dd>Queens, New York</dd></div>
-          <div><dt>The floor</dt><dd>Never looks the same twice</dd></div>
+          <div><dt>Where</dt><dd>96-03 37th Ave, Queens</dd></div>
+          <div><dt>Open since</dt><dd>2002</dd></div>
           <div><dt>Every piece</dt><dd>Bought direct from the brand</dd></div>
         </dl>
 
         <a class="btn btn--gold" href="shop.html">
-          Shop Now
+          See the Floor
           <svg class="btn__ico" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M1 8h13M9 3l5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.7"/></svg>
         </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══════════════════════════════════════════════ the shop band ═══ -->
+  <section class="section section--tight strip" aria-labelledby="strip-title">
+    <div class="wrap">
+      <div class="section-head" data-reveal>
+        <div class="section-head__text">
+          <p class="eyebrow">Inside</p>
+          <h2 id="strip-title">The floor on a normal day</h2>
+        </div>
+        <p class="sect-index">96-03 37th Ave</p>
+      </div>
+
+      <div class="strip__grid">
+        <figure class="strip__item" data-reveal>
+          <div class="strip__shot">
+            <picture>
+              <source type="image/webp" srcset="assets/img/gal-aisle-560.webp 560w, assets/img/gal-aisle-1100.webp 1100w" sizes="(max-width: 780px) 92vw, 31vw">
+              <img src="assets/img/gal-aisle-1100.jpg" srcset="assets/img/gal-aisle-560.jpg 560w, assets/img/gal-aisle-1100.jpg 1100w" sizes="(max-width: 780px) 92vw, 31vw" width="1100" height="733" loading="lazy" decoding="async" alt="Looking down the middle of the store, shelves and racks on both sides all the way to the counter">
+            </picture>
+          </div>
+          <figcaption>Straight down the middle of the shop.</figcaption>
+        </figure>
+
+        <figure class="strip__item" data-reveal data-reveal-delay="1">
+          <div class="strip__shot">
+            <picture>
+              <source type="image/webp" srcset="assets/img/gal-rail-560.webp 560w, assets/img/gal-rail-1100.webp 1100w" sizes="(max-width: 780px) 92vw, 31vw">
+              <img src="assets/img/gal-rail-1100.jpg" srcset="assets/img/gal-rail-560.jpg 560w, assets/img/gal-rail-1100.jpg 1100w" sizes="(max-width: 780px) 92vw, 31vw" width="1100" height="733" loading="lazy" decoding="async" alt="A lit rail of graphic tees and jerseys with folded stacks on the shelves above">
+            </picture>
+          </div>
+          <figcaption>Tee rail, under the shelf lights.</figcaption>
+        </figure>
+
+        <figure class="strip__item" data-reveal data-reveal-delay="2">
+          <div class="strip__shot">
+            <picture>
+              <source type="image/webp" srcset="assets/img/gal-turf-560.webp 560w, assets/img/gal-turf-1100.webp 1100w" sizes="(max-width: 780px) 92vw, 31vw">
+              <img src="assets/img/gal-turf-1100.jpg" srcset="assets/img/gal-turf-560.jpg 560w, assets/img/gal-turf-1100.jpg 1100w" sizes="(max-width: 780px) 92vw, 31vw" width="1100" height="733" loading="lazy" decoding="async" alt="Sweatshirts, jeans, a cap and a pair of sneakers laid out on the green turf inside the store">
+            </picture>
+          </div>
+          <figcaption>Laid out on the turf up front.</figcaption>
+        </figure>
       </div>
     </div>
   </section>
@@ -376,13 +446,13 @@
     <div class="wrap auth__grid">
       <div data-reveal>
         <p class="eyebrow">No fakes</p>
-        <h2 id="auth-title" class="h-sm" style="margin:18px 0 20px;font-size:clamp(1.25rem,2.7vw,2.05rem)">The latest drops. The real thing.</h2>
-        <p class="body-copy">Nothing fake has ever come through our door, and that doesn't change because it's a website.</p>
+        <h2 id="auth-title" class="h-sm" style="margin:18px 0 20px;font-size:clamp(1.25rem,2.7vw,2.05rem)">Everything in here is real.</h2>
+        <p class="body-copy">Nothing fake has come through this door in over twenty years, and a website doesn't change that.</p>
 
         <ul class="auth__list">
-          <li><span class="n">01</span><p>Twenty-plus years of relationships with the brands we deal with.</p></li>
-          <li><span class="n">02</span><p>We buy direct, not through a middleman.</p></li>
-          <li><span class="n">03</span><p>Same standard on the site as on the floor.</p></li>
+          <li><span class="n">01</span><p>Over twenty years of relationships with the brands we carry.</p></li>
+          <li><span class="n">02</span><p>We buy direct. No middleman, no third party.</p></li>
+          <li><span class="n">03</span><p>Same check on the site as on the floor.</p></li>
         </ul>
       </div>
 
@@ -393,7 +463,7 @@
                srcset="assets/img/cards-560.jpg 560w, assets/img/cards-980.jpg 980w"
                sizes="(max-width: 880px) 92vw, 38vw"
                width="980" height="660" loading="lazy" decoding="async"
-               alt="Gold-foil All Star Players business cards scattered on a black surface, the star-and-P monogram stamped on each one">
+               alt="Gold foil All Star Players business cards on a black surface, each stamped with the star and P monogram">
         </picture>
       </div>
     </div>
@@ -404,8 +474,8 @@
     <div class="wrap">
       <div class="section-head" data-reveal>
         <div class="section-head__text">
-          <p class="eyebrow">Visit Us</p>
-          <h2 id="visit-title">From the storefront to your screen.</h2>
+          <p class="eyebrow">Visit us</p>
+          <h2 id="visit-title">96-03 37th Ave.</h2>
         </div>
         <p class="sect-index">Queens, NY 11368</p>
       </div>
@@ -420,7 +490,7 @@
               <img src="assets/img/visit-storefront-560.jpg"
                    srcset="assets/img/visit-storefront-560.jpg 560w, assets/img/visit-storefront-946.jpg 946w"
                    sizes="(max-width: 900px) 92vw, 44vw"
-                   width="946" height="931" loading="lazy" decoding="async"
+                   width="946" height="925" loading="lazy" decoding="async"
                    alt="The All Star Players shopfront on 37th Avenue, lit windows and a motorcycle parked at the curb">
             </picture>
           </figure>
@@ -462,7 +532,7 @@
     </div>
   </section>
 
-  <!-- ═════════════════════════════════════════════ final CTA ════════ -->
+  <!-- ═════════════════════════════════════════════ final call ══════ -->
   <section class="final" aria-labelledby="final-title">
     <div class="final__bg" aria-hidden="true">
       <picture>
@@ -472,12 +542,15 @@
     </div>
     <div class="wrap final__inner">
       <p class="eyebrow eyebrow--plain">Come through</p>
-      <h2 id="final-title" class="foil" data-foil>Your next rotation starts here.</h2>
-      <p class="lede" style="text-align:center">Shop the site, or come see it in person on 37th Ave.</p>
-      <a class="btn btn--gold" href="shop.html">
-        Shop Now
-        <svg class="btn__ico" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M1 8h13M9 3l5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.7"/></svg>
-      </a>
+      <h2 id="final-title" class="foil" data-foil>Look for the star.</h2>
+      <p class="lede" style="text-align:center">37th Ave in Queens. Call the store and we'll tell you what's in.</p>
+      <div class="final__actions">
+        <a class="btn btn--gold" href="shop.html">
+          See the Floor
+          <svg class="btn__ico" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M1 8h13M9 3l5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.7"/></svg>
+        </a>
+        <a class="btn btn--ghost" href="tel:+17185051038">(718) 505-1038</a>
+      </div>
     </div>
   </section>
 </main>
@@ -503,12 +576,12 @@
           <li><a href="index.html">Home</a></li>
           <li><a href="shop.html">Shop</a></li>
           <li><a href="index.html#about">About</a></li>
-          <li><a href="index.html#visit">Visit Us</a></li>
+          <li><a href="index.html#visit">Visit</a></li>
         </ul>
       </nav>
 
       <div>
-        <h2 class="footer__title">The Store</h2>
+        <h2 class="footer__title">The store</h2>
         <address>
           <a href="https://www.google.com/maps/dir/?api=1&amp;destination=96-03%2037th%20Ave%2C%20Queens%2C%20NY%2011368" target="_blank" rel="noopener">96-03 37th Ave<br>Queens, NY 11368</a>
           <a href="tel:+17185051038">(718) 505-1038</a>
@@ -529,10 +602,10 @@
   </div>
 </footer>
 
-<!-- sticky mobile Shop Now -->
+<!-- the bar that follows you down the page on a phone -->
 <div class="mobile-cta" data-mobile-cta>
   <a class="btn btn--gold btn--block" href="shop.html">
-    Shop Now
+    See the Floor
     <svg class="btn__ico" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M1 8h13M9 3l5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.7"/></svg>
   </a>
 </div>
