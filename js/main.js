@@ -9,6 +9,28 @@
   var reduced = window.matchMedia('(prefers-reduced-motion: reduce)');
   function noMotion() { return reduced.matches; }
 
+  /* ---------------------------------------------------- start at the top
+     The head of each page already tells the browser not to restore the
+     old scroll position. This puts it back to zero as well, once when
+     the script runs and once after the fonts and pictures have settled,
+     because those can nudge the page as they arrive. A link that carries
+     an anchor on it (index.html#visit) is left alone. */
+  if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
+
+  function toTopNow() {
+    try { window.scrollTo({ top: 0, left: 0, behavior: 'instant' }); }
+    catch (err) { window.scrollTo(0, 0); }
+    document.documentElement.scrollTop = 0;
+    if (document.body) document.body.scrollTop = 0;
+  }
+
+  if (!window.location.hash) {
+    toTopNow();
+    if (document.readyState !== 'complete') {
+      window.addEventListener('load', toTopNow, { once: true });
+    }
+  }
+
   /* ------------------------------------------------------- sticky header */
   var header = document.querySelector('[data-header]');
   if (header) {
