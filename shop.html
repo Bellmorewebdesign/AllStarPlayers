@@ -37,7 +37,12 @@
 <link rel="stylesheet" href="css/base.css">
 <link rel="stylesheet" href="css/catalog.css">
 <link rel="stylesheet" href="css/shop.css">
-<script>document.documentElement.className = document.documentElement.className.replace('no-js', 'js');</script>
+<script>
+  document.documentElement.className = document.documentElement.className.replace('no-js', 'js');
+  /* Open every visit at the top of the page, not wherever the browser
+     last left off. Anchor links like #visit still go where they say. */
+  if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
+</script>
 
 <script type="application/ld+json">
 {
