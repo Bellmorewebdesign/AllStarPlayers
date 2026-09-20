@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 800" role="img" aria-label="Illustration of a low-top sneaker seen from the side">
+  <defs>
+    <linearGradient id="asp-mid" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FCFAF6"/><stop offset=".5" stop-color="#ECE7DD"/><stop offset="1" stop-color="#BAB4A9"/>
+    </linearGradient>
+    <linearGradient id="asp-up" x1=".15" y1="0" x2=".72" y2="1">
+      <stop offset="0" stop-color="#383838"/><stop offset="1" stop-color="#111"/>
+    </linearGradient>
+    <linearGradient id="asp-gold" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#A9761F"/><stop offset=".38" stop-color="#F7DA93"/>
+      <stop offset=".7" stop-color="#E4B24A"/><stop offset="1" stop-color="#9E6E1C"/>
+    </linearGradient>
+  </defs>
+
+  <ellipse cx="500" cy="676" rx="360" ry="20" fill="#000" opacity=".42"/>
+
+  <!-- tongue, behind the upper -->
+  <path d="M372 414 L580 358 C604 350 608 306 590 286 C576 270 556 264 548 274 Z" fill="#4E4E4E" stroke="#242424" stroke-width="4"/>
+  <!-- laces; the upper is painted over their lower ends -->
+  <g stroke="#EFEAE0" stroke-width="10" stroke-linecap="round" fill="none">
+    <path d="M420 404 L462 352"/><path d="M472 383 L514 318"/>
+    <path d="M520 363 L562 288"/><path d="M562 346 L590 288"/>
+  </g>
+
+  <!-- upper -->
+  <path d="M150 572
+           C140 540 152 512 182 494
+           C220 472 270 450 320 430
+           C380 406 440 382 500 358
+           C528 346 550 336 566 330
+           C578 326 588 332 592 342
+           C606 372 640 390 684 392
+           C730 394 768 372 794 330
+           C804 314 824 314 834 330
+           C858 372 870 434 864 486
+           C858 528 842 552 812 552
+           L150 572 Z" fill="url(#asp-up)"/>
+
+  <!-- collar padding -->
+  <path d="M592 342 C606 372 640 390 684 392 C730 394 768 372 794 330"
+        fill="none" stroke="url(#asp-gold)" stroke-width="14" stroke-linecap="round"/>
+  <!-- heel pull tab -->
+  <path d="M806 318 C820 306 840 312 842 328 L834 344 C828 330 818 322 806 318 Z" fill="url(#asp-gold)"/>
+  <!-- heel seam -->
+  <path d="M744 548 C734 470 752 388 800 332" fill="none" stroke="#484848" stroke-width="5"/>
+  <!-- toe seam + perforations -->
+  <path d="M292 556 C280 500 282 458 294 424" fill="none" stroke="#3E3E3E" stroke-width="5"/>
+  <g fill="#454545">
+    <circle cx="206" cy="510" r="5"/><circle cx="234" cy="496" r="5"/><circle cx="262" cy="484" r="5"/>
+    <circle cx="212" cy="540" r="5"/><circle cx="240" cy="526" r="5"/><circle cx="268" cy="514" r="5"/>
+  </g>
+
+  <!-- side panel -->
+  <path d="M344 556 C362 490 404 446 466 418 C486 411 502 418 506 434
+           C448 462 402 508 384 556 Z" fill="url(#asp-gold)"/>
+
+  <!-- eyelets -->
+  <g fill="#0A0A0A" stroke="url(#asp-gold)" stroke-width="3.5">
+    <circle cx="420" cy="404" r="8"/><circle cx="472" cy="383" r="8"/>
+    <circle cx="520" cy="363" r="8"/><circle cx="562" cy="346" r="8"/>
+  </g>
+
+  <!-- midsole -->
+  <path d="M116 606 C106 588 118 570 142 564 C240 548 320 544 400 542
+           L690 542 C780 544 842 560 876 584 C890 592 894 600 890 606 Z" fill="url(#asp-mid)"/>
+  <path d="M150 578 C300 560 640 556 864 584" fill="none" stroke="#B0A99E" stroke-width="4"/>
+
+  <!-- outsole, with a little toe spring -->
+  <path d="M126 594 C102 600 88 616 94 630 C100 644 122 654 150 654
+           L846 654 C878 654 900 644 902 624 C903 608 894 598 878 596 Z" fill="#161616"/>
+  <g stroke="#3D3D3D" stroke-width="7" stroke-linecap="round">
+    <path d="M200 616 L200 640"/><path d="M276 616 L276 641"/><path d="M352 616 L352 641"/>
+    <path d="M428 616 L428 641"/><path d="M504 616 L504 641"/><path d="M580 616 L580 641"/>
+    <path d="M656 616 L656 641"/><path d="M732 616 L732 641"/><path d="M808 616 L808 641"/>
+  </g>
+</svg>
