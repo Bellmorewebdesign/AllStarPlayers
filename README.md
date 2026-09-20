@@ -155,10 +155,15 @@ css/
   catalog.css           Cards, badges, the grid, the "photos not listings" note
   home.css              The video header and every section on the home page
   shop.css              Shop header, filters, sorting, the phone drawer
+  test-checkout.css     The Square sandbox test block on the shop page
 js/
   products.js           <- the catalog. Add products here.
   catalog.js            Draws the cards, runs search, filters and sorting
   main.js               Sticky header, phone menu, scroll reveals, the video
+  test-checkout.js      Fetches the one sandbox product and runs its Buy button
+backend/
+  index.mjs             The AWS Lambda behind both API endpoints
+  DEPLOY.md             <- how to get it on AWS. Read this before touching AWS.
 tools/
   build-media.sh        Regenerates assets/img and assets/video from the originals
 assets/
@@ -166,6 +171,7 @@ assets/
   fonts/                Self-hosted Boldonse + Instrument Sans (SIL OFL, licences included)
   img/                  Generated WebP + JPEG crops used across the site
   img/originals/        The six original photographs, untouched
+  img/products/         Product artwork. Only the sandbox test placeholder so far.
   video/                The two encoded MP4s
   video/originals/      The original store clip, untouched
 ```
@@ -204,8 +210,85 @@ Three notes for whoever edits next:
 - There are **no store hours and no email address** anywhere on the site, because none were
   given. When they arrive, add hours to the Visit block in `index.html` and to the
   `openingHoursSpecification` of the `ClothingStore` JSON-LD block in the `<head>`.
-- Nothing on the site quotes a price, and no page offers to sell anything, because there is no
-  checkout. Every "how much" route sends people to the phone number or the door.
+- Nothing in `js/products.js` quotes a price, and none of those cards offers to sell anything,
+  because there is no real checkout yet. Every "how much" route sends people to the phone
+  number or the door. The one exception is the Square **sandbox test block** on the shop page,
+  which is a test integration and says so in three places. See below.
+
+---
+
+## The Square sandbox test
+
+One product on the shop page can actually be bought, with a Square **sandbox** test card. No
+real money moves and nothing ships. It is a proving ground for a real checkout later, not a
+shop.
+
+### How it hangs together
+
+```
+shop.html  #test-checkout          the block, and the ids it reads
+  -> js/test-checkout.js           draws it, runs the button
+     -> GET  <api>/default/products   what to show and what it costs
+     -> POST <api>/default/checkout   asks Square for a checkout page
+        -> backend/index.mjs (AWS Lambda)
+           -> Secrets Manager     the Square token, which never leaves AWS
+           -> Square sandbox      creates the payment link
+     -> the browser goes to Square's own hosted checkout page
+```
+
+**No Square token is anywhere in this repository, and there must never be one.** The static
+site only ever talks to our own AWS endpoints. Everything secret lives in the AWS secret
+`all-star-players/square/sandbox`.
+
+### The rules it plays by
+
+- The price comes from Square, in cents, and is formatted in the browser. The browser never
+  sends a price, and the backend would ignore it if it did.
+- Only the one test variation, only one unit. Anything else is refused before Square is called.
+- If the API is down the block says so. It never falls back to invented product data.
+- Nothing on the page ever says a payment succeeded. A payment link is not a payment, and a
+  redirect is not a payment. Square's own confirmation page is what tells you.
+- Sandbox takes Square's test cards. It does not do Apple Pay or Google Pay, and the copy on
+  the page does not claim otherwise.
+
+### The picture
+
+`assets/img/products/test-sneaker.svg` is a **drawing**, not a photograph — an original
+illustration in the site's own black, bone and gold, made for this repository, so there is no
+stock licence to worry about. The caption under it says as much.
+
+To swap in a real photograph: drop it in `assets/img/products/`, then point the block at it by
+editing one attribute in `shop.html`:
+
+```html
+data-image="assets/img/products/your-photo.jpg"
+data-image-alt="What the photograph shows"
+```
+
+Nothing else needs to change. If you buy or licence a stock photo, keep the licence file next
+to it the way the fonts do.
+
+### Changing the endpoints
+
+The API base URL and the two Square ids are attributes on the block in `shop.html`, not
+constants buried in the JavaScript:
+
+```html
+data-api="https://n9ecaydkv4.execute-api.us-east-1.amazonaws.com/default"
+data-item="E5LVW7ULD463KVCQKLV7SN63"
+data-variation="T2APLGR5UFWGFELNUHGVNVI2"
+```
+
+### Taking it off the site
+
+Delete the `<section id="test-checkout">` block from `shop.html`. The two file references in
+the `<head>` and before `</body>` can go with it. Nothing else on the site depends on it.
+
+### The AWS side
+
+`backend/index.mjs` is the whole function and `backend/DEPLOY.md` is the runbook: replacing the
+code, adding the `POST /checkout` route, checking the Lambda invoke permission, turning on
+CORS, and taking a test payment. Read it before touching the console.
 
 ## Publishing on GitHub Pages
 

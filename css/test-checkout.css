@@ -1,0 +1,104 @@
+/* ==========================================================================
+   All Star Players / Square sandbox test block
+   Uses the tokens from base.css, so it stays on the same palette, the same
+   sharp 2px corners and the same type as the rest of the site.
+   Phone first: one column. Two columns from 760px up.
+   ========================================================================== */
+
+.sqt-section{border-top:1px solid var(--line)}
+
+.sqt{
+  display:grid;gap:clamp(20px,3vw,34px);
+  align-items:start;
+  border:1px solid var(--line);
+  border-left:2px solid var(--gold);
+  border-radius:var(--r);
+  background:
+    radial-gradient(120% 130% at 8% 0%,rgba(228,178,74,.08),transparent 58%),
+    var(--char);
+  padding:clamp(18px,3.4vw,38px);
+}
+@media (min-width:760px){
+  .sqt{grid-template-columns:minmax(0,42%) minmax(0,1fr);gap:clamp(28px,3.4vw,52px)}
+}
+
+/* ---------- the photograph ---------- */
+.sqt__media{display:grid;gap:10px;min-width:0}
+.sqt__img{
+  width:100%;height:auto;aspect-ratio:5/4;object-fit:contain;
+  background:linear-gradient(168deg,#1F1F1F,#0E0E0E);
+  border:1px solid var(--line);border-radius:var(--r);
+  padding:clamp(8px,1.6vw,18px);
+}
+.sqt__imgnote{
+  font-size:.62rem;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--bone-3);line-height:1.5;
+}
+
+/* ---------- the words ---------- */
+.sqt__body{display:grid;gap:14px;justify-items:start;min-width:0}
+
+.sqt__flag{
+  display:inline-flex;align-items:center;gap:8px;
+  padding:6px 12px;border:1px solid var(--gold-line);border-radius:var(--r);
+  background:rgba(228,178,74,.08);
+  color:var(--gold);font-weight:700;
+  font-size:.6rem;letter-spacing:.18em;text-transform:uppercase;
+}
+.sqt__flag::before{
+  content:"";width:7px;height:7px;flex:none;border-radius:50%;
+  background:var(--gold);
+}
+
+.sqt__name{font-size:clamp(1.05rem,2.6vw,1.6rem);line-height:1.25;max-width:22ch}
+
+.sqt__price{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap}
+.sqt__amount{
+  font-family:var(--display);font-size:clamp(1.5rem,4.6vw,2.3rem);
+  line-height:1;color:var(--bone);
+}
+.sqt__cur{font-size:.64rem;letter-spacing:.2em;color:var(--bone-3)}
+
+.sqt__desc{color:var(--bone-2);max-width:52ch;font-size:.9rem;line-height:1.65}
+
+.sqt__meta{
+  display:flex;flex-wrap:wrap;gap:8px 10px;list-style:none;padding:0;margin:0;
+}
+.sqt__meta li{
+  border:1px solid var(--line-2);border-radius:var(--r);
+  padding:5px 11px;
+  font-size:.66rem;letter-spacing:.1em;text-transform:uppercase;color:var(--bone-2);
+}
+
+.sqt__buy{margin-top:4px}
+.sqt__buy[disabled]{opacity:.62;cursor:progress;filter:saturate(.7)}
+
+.sqt__status{color:var(--bone-3);font-size:.78rem;line-height:1.6;max-width:50ch}
+.sqt__status:empty{display:none}
+
+.sqt__err{
+  border:1px solid rgba(214,92,72,.5);border-left:2px solid #D65C48;
+  border-radius:var(--r);background:rgba(214,92,72,.09);
+  padding:11px 14px;color:#F0C3B9;font-size:.8rem;line-height:1.6;max-width:52ch;
+}
+
+.sqt__fine{color:var(--bone-3);font-size:.7rem;line-height:1.7;max-width:56ch}
+
+/* the thin gold sweep under the loading line */
+.sqt__bar{
+  display:block;width:min(240px,70%);height:2px;border-radius:2px;
+  background:linear-gradient(90deg,transparent,var(--gold),transparent);
+  background-size:220% 100%;
+  animation:sqt-sweep 1.15s linear infinite;
+}
+@keyframes sqt-sweep{from{background-position:120% 0}to{background-position:-120% 0}}
+
+.sqt.is-loading .sqt__img,
+.sqt.is-error .sqt__img,
+.sqt.is-empty .sqt__img{opacity:.42}
+.sqt.is-loading .sqt__img{transition:opacity .4s var(--ease)}
+
+@media (prefers-reduced-motion:reduce){
+  .sqt__bar{animation:none;background:var(--gold-line)}
+  .sqt__img{transition:none}
+}

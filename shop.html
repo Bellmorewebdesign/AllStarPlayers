@@ -37,6 +37,7 @@
 <link rel="stylesheet" href="css/base.css">
 <link rel="stylesheet" href="css/catalog.css">
 <link rel="stylesheet" href="css/shop.css">
+<link rel="stylesheet" href="css/test-checkout.css">
 <script>
   document.documentElement.className = document.documentElement.className.replace('no-js', 'js');
   /* Open every visit at the top of the page, not wherever the browser
@@ -132,6 +133,39 @@
         </div>
         <p>Tees, fleece, bottoms, sneakers, hats and the small stuff. Pick a category to see what that rack looks like right now.</p>
       </div>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════════════ square sandbox test ═══════ -->
+  <!-- One product, fetched live from our AWS endpoint, with a real Square
+       sandbox checkout behind the button. js/test-checkout.js draws it and
+       css/test-checkout.css styles it. Delete this section to remove it. -->
+  <section class="section section--tight sqt-section" id="test-checkout" aria-labelledby="sqt-title">
+    <div class="wrap">
+      <div class="section-head" data-reveal>
+        <div class="section-head__text">
+          <p class="eyebrow">Online checkout, in testing</p>
+          <h2 id="sqt-title">One item, one test card</h2>
+          <p class="lede" style="margin-top:18px">This is a Square sandbox integration we are trying out. No real card is charged and nothing ships.</p>
+        </div>
+      </div>
+
+      <div class="sqt is-loading"
+           data-square-test
+           data-api="https://n9ecaydkv4.execute-api.us-east-1.amazonaws.com/default"
+           data-item="E5LVW7ULD463KVCQKLV7SN63"
+           data-variation="T2APLGR5UFWGFELNUHGVNVI2"
+           data-image="assets/img/products/test-sneaker.svg"
+           data-image-alt="Illustration of a low-top sneaker, standing in for a product photograph">
+        <div class="sqt__body">
+          <p class="sqt__flag">Sandbox — test payments only</p>
+          <p class="sqt__status">Loading the test product from Square…</p>
+        </div>
+      </div>
+
+      <noscript>
+        <p class="sqt__status" style="margin-top:16px">The test checkout needs JavaScript switched on.</p>
+      </noscript>
     </div>
   </section>
 
@@ -297,6 +331,7 @@
 
 <script src="js/products.js"></script>
 <script src="js/catalog.js"></script>
+<script src="js/test-checkout.js"></script>
 <script src="js/main.js"></script>
 </body>
 </html>
