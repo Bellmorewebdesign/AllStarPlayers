@@ -1,8 +1,24 @@
 # Deploying the Square sandbox backend
 
-Everything in here has to be done by you: this branch was built in a container
-that has no access to your AWS account, so nothing below has been run for you.
-Work top to bottom. Each step ends with something you can check.
+## Shipping-address update (2026-10-04)
+
+The existing product route, checkout route and GitHub Pages CORS were verified working
+on October 4, 2026. For this update, deploy the new `backend/index.mjs` using Step 1;
+you do not need to recreate routes, permissions or CORS that already work.
+Updating GitHub alone does **not** deploy Lambda.
+
+Checkout now sends `ask_for_shipping_address: true` to Square. This collects an
+address on the hosted checkout; it does not buy a UPS/USPS/FedEx label, calculate
+carrier rates, restrict shipping destinations or promise a delivery date. No
+shipping fee is configured pending the client's decision. Keep this sandbox-only
+until shipping areas, rates, taxes and fulfillment are agreed and implemented.
+
+After deploying, start a new checkout attempt (reload the shop page) so it uses a
+new idempotency key and creates a link with the new options. Existing payment links
+are not changed by deploying this file. Check the preview as described in Step 5.
+
+The remaining steps document initial setup and troubleshooting. AWS deployment is
+manual; repository changes do not mean that the running Lambda has been updated.
 
 **What already exists** (confirmed working before these changes):
 
@@ -15,19 +31,15 @@ Work top to bottom. Each step ends with something you can check.
 | Sandbox location | `LPDXRBQ28WHB6` |
 | Live route | `GET https://n9ecaydkv4.execute-api.us-east-1.amazonaws.com/default/products` |
 
-**What is missing** (checked on this branch, both still true):
-
-- `POST /default/checkout` returns `{"message":"Not Found"}` — the route does not exist.
-- Neither `GET /default/products` nor an `OPTIONS` preflight returns any
-  `Access-Control-Allow-Origin` header, so a browser on
-  `https://bellmorewebdesign.github.io` cannot call the API at all.
+**Already verified:** `GET /products` returns the test product, `POST /checkout`
+creates a sandbox payment link, and responses allow the GitHub Pages origin.
 
 ---
 
 ## Step 1 — put the new code on the Lambda
 
 `backend/index.mjs` in this repository is the complete replacement. It keeps
-`GET /products` answering exactly as it does today and adds `POST /checkout`.
+`GET /products` and `POST /checkout` working and enables shipping-address collection.
 
 **Console:** Lambda → `all-star-players-square-api-sandbox` → **Code** tab →
 open `index.mjs` → select all → paste the new file over it → **Deploy**.
@@ -142,8 +154,8 @@ the message names the key at fault.
 
 ## Step 4 — turn on CORS for the website's origin
 
-This is the step that was missing. Without it the API works from `curl` and
-fails in every browser. The origin is the **bare host**, with no repository
+CORS is already configured for GitHub Pages. If rebuilding the API, configure it
+here so browser requests can read the responses. The origin is the **bare host**, with no repository
 path on the end — a browser never sends one.
 
 **Console:** API Gateway → `n9ecaydkv4` → **CORS** → **Configure**:
@@ -159,14 +171,8 @@ path on the end — a browser never sends one.
 
 ```bash
 aws apigatewayv2 update-api --api-id n9ecaydkv4 --region us-east-1 \
-  --cors-configuration \
-    AllowOrigins=https://bellmorewebdesign.github.io,\
-AllowMethods=GET,AllowMethods=POST,AllowMethods=OPTIONS,\
-AllowHeaders=content-type,MaxAge=600
+  --cors-configuration '{"AllowOrigins":["https://bellmorewebdesign.github.io"],"AllowMethods":["GET","POST","OPTIONS"],"AllowHeaders":["content-type"],"MaxAge":300}'
 ```
-
-If the shell fights you over the repeated keys, use the console — it is the
-same setting.
 
 **Check it.** Both of these must print an
 `access-control-allow-origin: https://bellmorewebdesign.github.io` line:
@@ -188,11 +194,11 @@ curl -i -H 'Origin: https://bellmorewebdesign.github.io' \
 the API-level configuration is missing. When both are present API Gateway's
 configuration is the one that takes effect.
 
-## Step 5 — take a sandbox payment
+## Step 5 — check the shipping checkout preview
 
 ```bash
 curl -s -X POST -H 'content-type: application/json' \
-  -d '{"variationId":"T2APLGR5UFWGFELNUHGVNVI2","quantity":1,"idempotencyKey":"asp-manual-test-0001"}' \
+  -d '{"variationId":"T2APLGR5UFWGFELNUHGVNVI2","quantity":1,"idempotencyKey":"asp-shipping-preview-0001"}' \
   https://n9ecaydkv4.execute-api.us-east-1.amazonaws.com/default/checkout
 ```
 
@@ -204,18 +210,20 @@ You want:
  "orderId":"...","paymentLinkId":"..."}
 ```
 
-Open that URL and pay with a Square sandbox test card — `4111 1111 1111 1111`,
-any future expiry, CVV `111`, postal code `94103`. Square's own confirmation
-page is what tells you it worked.
+Open that URL and choose the checkout preview if Square first shows a testing
+panel. Verify the correct item, $100 price and shipping-address fields. The
+preview's card fields and Pay button are disabled: this is expected, not a Lambda
+failure. Do not claim a completed payment or look for a successful transaction
+based only on creating a link. Use a fresh idempotency key after changing checkout
+options, but reuse the same key when retrying an unchanged request.
 
-Then confirm it landed, in the **Square Developer Dashboard → your sandbox
-application → Sandbox Test Accounts → open the seller dashboard**: the order
-should be under Orders and the payment under Transactions, for location
-`LPDXRBQ28WHB6`, at $100.00.
+Square references:
+- [CheckoutOptions: ask_for_shipping_address](https://developer.squareup.com/reference/square/objects/CheckoutOptions)
+- [Square support: disabled payment fields in sandbox hosted checkout](https://developer.squareup.com/forums/t/issue-with-credit-card-fields-and-pay-button-disabled-in-square-checkout-api-in-sandbox-enviornment/21045)
 
 Finally, load the real site at
 `https://bellmorewebdesign.github.io/AllStarPlayers/shop.html`, scroll to the
-test block and press **Buy Now — Test Checkout**. It should take you to Square.
+test block and press **Preview Shipping Checkout**. It should take you to Square.
 If the block says "Could not reach the product service", open the browser
 console — a CORS message there means step 4 did not take.
 
@@ -250,7 +258,7 @@ with `Square-Version: 2026-09-16` and:
     "location_id": "<SQUARE_LOCATION_ID from the secret>",
     "line_items": [{ "catalog_object_id": "T2APLGR5UFWGFELNUHGVNVI2", "quantity": "1" }]
   },
-  "checkout_options": { "allow_tipping": false, "ask_for_shipping_address": false }
+  "checkout_options": { "allow_tipping": false, "ask_for_shipping_address": true }
 }
 ```
 

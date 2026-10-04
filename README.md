@@ -219,9 +219,11 @@ Three notes for whoever edits next:
 
 ## The Square sandbox test
 
-One product on the shop page can actually be bought, with a Square **sandbox** test card. No
-real money moves and nothing ships. It is a proving ground for a real checkout later, not a
-shop.
+One product on the shop page opens a Square **sandbox hosted checkout preview**.
+The backend requests shipping-address fields. The preview cannot accept payments;
+no money moves and nothing ships. Shipping charges, carrier rates, labels and delivery
+estimates are not configured. Confirm shipping areas, rates and fulfillment with the
+client before preparing a separate production checkout.
 
 ### How it hangs together
 
@@ -248,8 +250,10 @@ site only ever talks to our own AWS endpoints. Everything secret lives in the AW
 - If the API is down the block says so. It never falls back to invented product data.
 - Nothing on the page ever says a payment succeeded. A payment link is not a payment, and a
   redirect is not a payment. Square's own confirmation page is what tells you.
-- Sandbox takes Square's test cards. It does not do Apple Pay or Google Pay, and the copy on
-  the page does not claim otherwise.
+- Hosted sandbox payment links are previews with disabled payment fields. Do not try to
+  complete a test-card payment on this preview. Link creation does not verify payment.
+- Shipping-address collection is enabled with `checkout_options.ask_for_shipping_address`.
+  No `shipping_fee` is sent while rates are undecided; this is not a free-shipping policy.
 
 ### The picture
 
@@ -288,7 +292,7 @@ the `<head>` and before `</body>` can go with it. Nothing else on the site depen
 
 `backend/index.mjs` is the whole function and `backend/DEPLOY.md` is the runbook: replacing the
 code, adding the `POST /checkout` route, checking the Lambda invoke permission, turning on
-CORS, and taking a test payment. Read it before touching the console.
+CORS, and checking the shipping preview. Read it before touching the console.
 
 ## Publishing on GitHub Pages
 
