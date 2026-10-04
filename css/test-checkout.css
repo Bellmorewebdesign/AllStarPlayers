@@ -73,6 +73,20 @@
 .sqt__buy{margin-top:4px}
 .sqt__buy[disabled]{opacity:.62;cursor:progress;filter:saturate(.7)}
 
+.sqt__fulfillment{border:0;padding:0;margin:4px 0 0;min-width:0;width:100%}
+.sqt__fulfillment legend{font-size:.85rem;color:var(--bone);margin-bottom:10px}
+.sqt__choices{display:flex;flex-wrap:wrap;gap:10px}
+.sqt__choice{
+  display:flex;align-items:center;gap:10px;min-height:48px;
+  padding:12px 16px;border:1px solid var(--line-2);border-radius:var(--r);
+  color:var(--bone-2);font-size:.85rem;cursor:pointer;
+}
+.sqt__choice input{width:18px;height:18px;margin:0;accent-color:var(--gold);flex:none}
+.sqt__choice:has(input:checked){border-color:var(--gold);background:rgba(228,178,74,.08);color:var(--bone)}
+.sqt__choice:focus-within{outline:2px solid var(--gold);outline-offset:3px}
+.sqt__fulfillment:disabled{opacity:.62}
+.sqt__fulfillment:disabled .sqt__choice{cursor:progress}
+
 .sqt__status{color:var(--bone-3);font-size:.78rem;line-height:1.6;max-width:50ch}
 .sqt__status:empty{display:none}
 
