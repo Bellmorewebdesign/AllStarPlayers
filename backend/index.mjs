@@ -214,7 +214,9 @@ async function postCheckout(cfg, event) {
       },
       checkout_options: {
         allow_tipping: false,            /* retail test, no tip screen */
-        ask_for_shipping_address: false
+        // Collect the address on Square's hosted checkout. Shipping rates,
+        // carrier labels and delivery estimates are not configured by this flag.
+        ask_for_shipping_address: true
       }
     }
   });

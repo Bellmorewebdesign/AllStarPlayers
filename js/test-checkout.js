@@ -29,7 +29,8 @@
      same key as the same attempt, so a retry after a failure reuses it and
      cannot create a second order. It is thrown away once Square has given us
      a link, so the next visit starts a genuinely new attempt. */
-  var KEY_NAME = 'asp.sq.idem.' + CFG.variationId;
+  // Checkout options changed: do not reuse a pre-shipping request's key.
+  var KEY_NAME = 'asp.sq.idem.shipping-v1.' + CFG.variationId;
 
   /* ---------------------------------------------------------------- utils */
   function el(tag, cls, text) {
@@ -108,7 +109,7 @@
   }
 
   function flag(body) {
-    body.appendChild(el('p', 'sqt__flag', 'Sandbox — test payments only'));
+    body.appendChild(el('p', 'sqt__flag', 'Sandbox — checkout preview'));
   }
 
   /* --------------------------------------------------------------- states */
@@ -168,7 +169,7 @@
     meta.appendChild(el('li', null, 'Quantity: 1'));
     body.appendChild(meta);
 
-    var btn = el('button', 'btn btn--gold sqt__buy', 'Buy Now — Test Checkout');
+    var btn = el('button', 'btn btn--gold sqt__buy', 'Preview Shipping Checkout');
     btn.type = 'button';
     body.appendChild(btn);
 
@@ -182,9 +183,8 @@
     body.appendChild(err);
 
     body.appendChild(el('p', 'sqt__fine',
-      'Square hosts the checkout page and the confirmation that follows it. Sandbox takes ' +
-      'Square’s test cards only; Apple Pay and Google Pay are not part of this test. ' +
-      'Nothing here can tell you a payment succeeded — Square is what confirms that.'));
+      'Preview a shipping checkout hosted by Square. This sandbox preview cannot accept ' +
+      'payments, and nothing ships. Shipping charges and delivery estimates are not yet set.'));
 
     btn.addEventListener('click', function () {
       buy(btn, status, err, variation);
