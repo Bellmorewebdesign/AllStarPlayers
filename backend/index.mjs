@@ -21,6 +21,7 @@
    ========================================================================== */
 
 import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
+import { createHash } from 'node:crypto';
 
 /* ---------------------------------------------------------------- config */
 
@@ -176,10 +177,22 @@ async function postCheckout(cfg, event) {
   } catch {
     return reply(400, event, { success: false, error: 'BAD_JSON', message: 'The request body is not valid JSON.' });
   }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return reply(400, event, { success: false, error: 'BAD_JSON', message: 'The request body must be a JSON object.' });
+  }
 
   const variationId = typeof body.variationId === 'string' ? body.variationId.trim() : '';
   const quantity = Number(body.quantity);
   const idempotencyKey = typeof body.idempotencyKey === 'string' ? body.idempotencyKey.trim() : '';
+  // Older cached pages did not send a choice; keep their shipping checkout working.
+  const fulfillment = body.fulfillment === undefined ? 'shipping' : body.fulfillment;
+
+  if (fulfillment !== 'shipping' && fulfillment !== 'pickup') {
+    return reply(400, event, {
+      success: false, error: 'FULFILLMENT_NOT_ALLOWED',
+      message: 'Choose shipping or store pickup.'
+    });
+  }
 
   if (variationId !== ALLOWED_VARIATION_ID) {
     return reply(400, event, {
@@ -203,20 +216,42 @@ async function postCheckout(cfg, event) {
   /* Nothing about money is read from `body`. The line item names a catalog
      variation and Square prices it from its own catalog, so a browser cannot
      talk the total down. */
+  const order = {
+    location_id: cfg.locationId,
+    line_items: [{ catalog_object_id: ALLOWED_VARIATION_ID, quantity: String(ALLOWED_QUANTITY) }]
+  };
+  if (fulfillment === 'pickup') {
+    order.fulfillments = [{
+      type: 'PICKUP',
+      state: 'PROPOSED',
+      pickup_details: {
+        schedule_type: 'ASAP',
+        // Sandbox sample only, not the store's actual turnaround or opening hours.
+        // Relative durations keep the request identical on idempotent retries.
+        prep_time_duration: 'PT1H',
+        pickup_window_duration: 'PT1H',
+        note: 'Sandbox preview only. Pickup times and location are test data; no real pickup is booked.'
+      }
+    }];
+  }
+
+  // Separate choices even if a caller reuses a key. Never reuse a shipping link
+  // for pickup, or an older shipping-only build's link for this request shape.
+  const squareKey = 'asp-fulfillment-v1-' + createHash('sha256')
+    .update(JSON.stringify([idempotencyKey, fulfillment, ALLOWED_VARIATION_ID, ALLOWED_QUANTITY]))
+    .digest('hex');
+
   const created = await square('/v2/online-checkout/payment-links', {
     token: cfg.token,
     method: 'POST',
     body: {
-      idempotency_key: idempotencyKey,
-      order: {
-        location_id: cfg.locationId,
-        line_items: [{ catalog_object_id: ALLOWED_VARIATION_ID, quantity: String(ALLOWED_QUANTITY) }]
-      },
+      idempotency_key: squareKey,
+      order,
       checkout_options: {
         allow_tipping: false,            /* retail test, no tip screen */
         // Collect the address on Square's hosted checkout. Shipping rates,
         // carrier labels and delivery estimates are not configured by this flag.
-        ask_for_shipping_address: true
+        ask_for_shipping_address: fulfillment === 'shipping'
       }
     }
   });
@@ -231,6 +266,7 @@ async function postCheckout(cfg, event) {
   return reply(200, event, {
     success: true,
     environment: cfg.environment,
+    fulfillment,
     checkoutUrl: link.url,
     orderId: link.order_id ?? null,
     paymentLinkId: link.id ?? null

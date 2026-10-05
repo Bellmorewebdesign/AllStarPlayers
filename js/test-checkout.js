@@ -29,8 +29,7 @@
      same key as the same attempt, so a retry after a failure reuses it and
      cannot create a second order. It is thrown away once Square has given us
      a link, so the next visit starts a genuinely new attempt. */
-  // Checkout options changed: do not reuse a pre-shipping request's key.
-  var KEY_NAME = 'asp.sq.idem.shipping-v1.' + CFG.variationId;
+  var KEY_NAME = 'asp.sq.idem.fulfillment-v1.' + CFG.variationId + '.';
 
   /* ---------------------------------------------------------------- utils */
   function el(tag, cls, text) {
@@ -52,26 +51,26 @@
     }
   }
 
-  var memoKey = null;
-  function idempotencyKey() {
-    if (memoKey) return memoKey;
+  var memoKeys = {};
+  function idempotencyKey(fulfillment) {
+    if (memoKeys[fulfillment]) return memoKeys[fulfillment];
     var k = null;
     /* sessionStorage throws outright in some private-browsing modes, so the
        key is held in memory as well and that copy is what a retry reads. */
-    try { k = window.sessionStorage.getItem(KEY_NAME); } catch (e) { /* no storage */ }
+    try { k = window.sessionStorage.getItem(KEY_NAME + fulfillment); } catch (e) { /* no storage */ }
     if (!k) {
       var rand = (window.crypto && window.crypto.randomUUID)
         ? window.crypto.randomUUID()
         : String(Date.now()) + '-' + Math.random().toString(36).slice(2, 12);
       k = 'asp-' + rand;
-      try { window.sessionStorage.setItem(KEY_NAME, k); } catch (e) { /* no storage */ }
+      try { window.sessionStorage.setItem(KEY_NAME + fulfillment, k); } catch (e) { /* no storage */ }
     }
-    memoKey = k;
+    memoKeys[fulfillment] = k;
     return k;
   }
-  function forgetKey() {
-    memoKey = null;
-    try { window.sessionStorage.removeItem(KEY_NAME); } catch (e) { /* nothing to do */ }
+  function forgetKey(fulfillment) {
+    delete memoKeys[fulfillment];
+    try { window.sessionStorage.removeItem(KEY_NAME + fulfillment); } catch (e) { /* nothing to do */ }
   }
 
   function json(url, options) {
@@ -169,6 +168,39 @@
     meta.appendChild(el('li', null, 'Quantity: 1'));
     body.appendChild(meta);
 
+    var fulfillment = 'shipping';
+    var choices = el('fieldset', 'sqt__fulfillment');
+    choices.appendChild(el('legend', null, 'How would you like to get it?'));
+    var choiceRow = el('div', 'sqt__choices');
+    ['shipping', 'pickup'].forEach(function (value) {
+      var label = el('label', 'sqt__choice');
+      var input = el('input');
+      input.type = 'radio';
+      input.name = 'sqt-fulfillment';
+      input.value = value;
+      input.checked = value === fulfillment;
+      input.setAttribute('aria-describedby', 'sqt-fulfillment-detail');
+      label.appendChild(input);
+      label.appendChild(el('span', null, value === 'shipping' ? 'Ship to me' : 'Store pickup'));
+      choiceRow.appendChild(label);
+      input.addEventListener('change', function () {
+        if (!input.checked) return;
+        fulfillment = value;
+        btn.textContent = value === 'shipping' ? 'Preview Shipping Checkout' : 'Preview Pickup Checkout';
+        detail.textContent = fulfillmentDetail(value);
+        err.hidden = true;
+        err.textContent = '';
+        status.textContent = '';
+      });
+    });
+    choices.appendChild(choiceRow);
+    body.appendChild(choices);
+
+    var detail = el('p', 'sqt__fine', fulfillmentDetail(fulfillment));
+    detail.id = 'sqt-fulfillment-detail';
+    detail.setAttribute('aria-live', 'polite');
+    body.appendChild(detail);
+
     var btn = el('button', 'btn btn--gold sqt__buy', 'Preview Shipping Checkout');
     btn.type = 'button';
     body.appendChild(btn);
@@ -183,12 +215,18 @@
     body.appendChild(err);
 
     body.appendChild(el('p', 'sqt__fine',
-      'Preview a shipping checkout hosted by Square. This sandbox preview cannot accept ' +
-      'payments, and nothing ships. Shipping charges and delivery estimates are not yet set.'));
+      'Preview checkout hosted by Square. This sandbox preview cannot accept ' +
+      'payments. Nothing ships and no pickup is booked.'));
 
     btn.addEventListener('click', function () {
-      buy(btn, status, err, variation);
+      buy(btn, status, err, variation, fulfillment, choices);
     });
+  }
+
+  function fulfillmentDetail(fulfillment) {
+    return fulfillment === 'pickup'
+      ? 'Collect at the store. Any location or pickup time shown in this sandbox checkout is sample data.'
+      : 'Delivery by mail or carrier. Shipping charges and delivery estimates are not yet set.';
   }
 
   /* -------------------------------------------------------------- loading */
@@ -243,15 +281,16 @@
   }
 
   /* ------------------------------------------------------------- checkout */
-  function buy(btn, status, err, variation) {
+  function buy(btn, status, err, variation, fulfillment, choices) {
     btn.disabled = true;
+    choices.disabled = true;
     btn.setAttribute('aria-busy', 'true');
     btn.textContent = 'Opening Square…';
     err.hidden = true;
     err.textContent = '';
     status.textContent = 'Asking Square for a checkout page…';
 
-    var key = idempotencyKey();
+    var key = idempotencyKey(fulfillment);
 
     json(CFG.api + '/checkout', {
       method: 'POST',
@@ -259,25 +298,32 @@
       body: JSON.stringify({
         variationId: variation.id,
         quantity: 1,
+        fulfillment: fulfillment,
         idempotencyKey: key
       })
     }).then(function (res) {
       var b = res.body;
       if (res.ok && b && b.success === true && b.checkoutUrl) {
+        // An older Lambda ignores the choice and always creates shipping links.
+        // Stop here until the matching backend has been deployed.
+        if (b.fulfillment !== fulfillment || b.environment !== 'sandbox') {
+          fail(btn, status, err, 'The checkout service needs an update before it can confirm your pickup or shipping choice.', choices);
+          return;
+        }
         /* This attempt is spent. Square owns the outcome from here: we are
            leaving the site, and nothing on this page claims a payment went
            through. */
-        forgetKey();
+        forgetKey(fulfillment);
         status.textContent = 'Taking you to Square’s sandbox checkout…';
         window.location.assign(b.checkoutUrl);
         return;
       }
       /* The key is deliberately kept, so pressing the button again is the
          same attempt rather than a second order. */
-      fail(btn, status, err, messageFor(res));
+      fail(btn, status, err, messageFor(res), choices);
     }).catch(function (e) {
       if (window.console) console.error('[square-test] checkout request failed', e);
-      fail(btn, status, err, 'The request to our checkout API did not complete. Check the connection and try again.');
+      fail(btn, status, err, 'The request to our checkout API did not complete. Check the connection and try again.', choices);
     });
   }
 
@@ -297,8 +343,9 @@
     return 'The checkout service answered ' + res.status + '.';
   }
 
-  function fail(btn, status, err, message) {
+  function fail(btn, status, err, message, choices) {
     btn.disabled = false;
+    choices.disabled = false;
     btn.removeAttribute('aria-busy');
     btn.textContent = 'Try Checkout Again';
     status.textContent = '';

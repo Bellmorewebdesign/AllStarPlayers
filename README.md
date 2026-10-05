@@ -220,10 +220,13 @@ Three notes for whoever edits next:
 ## The Square sandbox test
 
 One product on the shop page opens a Square **sandbox hosted checkout preview**.
-The backend requests shipping-address fields. The preview cannot accept payments;
-no money moves and nothing ships. Shipping charges, carrier rates, labels and delivery
-estimates are not configured. Confirm shipping areas, rates and fulfillment with the
-client before preparing a separate production checkout.
+Choose **Ship to me** or **Store pickup** before opening Square. Shipping collects
+an address; pickup creates a `PICKUP` fulfillment at the sandbox location. The
+preview cannot accept payments; nothing ships and no pickup is booked. Pickup
+uses a sample one-hour preparation time and one-hour pickup window, not the
+store's actual readiness policy. Shipping charges, carrier rates, labels and
+delivery estimates are not configured. Confirm shipping areas/rates and pickup
+location/hours/readiness with the client before preparing production checkout.
 
 ### How it hangs together
 
@@ -252,8 +255,11 @@ site only ever talks to our own AWS endpoints. Everything secret lives in the AW
   redirect is not a payment. Square's own confirmation page is what tells you.
 - Hosted sandbox payment links are previews with disabled payment fields. Do not try to
   complete a test-card payment on this preview. Link creation does not verify payment.
-- Shipping-address collection is enabled with `checkout_options.ask_for_shipping_address`.
-  No `shipping_fee` is sent while rates are undecided; this is not a free-shipping policy.
+- Shipping-address collection is enabled only for shipping. Pickup uses an explicit
+  Square `PICKUP` fulfillment with shipping-address collection disabled.
+- No `shipping_fee` is sent while rates are undecided; this is not a free-shipping policy.
+- Retries preserve the key per fulfillment mode; changing modes cannot reuse a link
+  for the other mode. The frontend verifies the backend confirms the chosen mode.
 
 ### The picture
 
@@ -292,7 +298,7 @@ the `<head>` and before `</body>` can go with it. Nothing else on the site depen
 
 `backend/index.mjs` is the whole function and `backend/DEPLOY.md` is the runbook: replacing the
 code, adding the `POST /checkout` route, checking the Lambda invoke permission, turning on
-CORS, and checking the shipping preview. Read it before touching the console.
+CORS, and checking both pickup and shipping previews. Read it before touching the console.
 
 ## Publishing on GitHub Pages
 

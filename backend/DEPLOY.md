@@ -1,21 +1,39 @@
 # Deploying the Square sandbox backend
 
-## Shipping-address update (2026-10-04)
+## Pickup + shipping update (2026-10-04)
 
-The existing product route, checkout route and GitHub Pages CORS were verified working
-on October 4, 2026. For this update, deploy the new `backend/index.mjs` using Step 1;
-you do not need to recreate routes, permissions or CORS that already work.
-Updating GitHub alone does **not** deploy Lambda.
+The shop now offers **Ship to me** (carrier shipping) and **Store pickup** before
+opening Square. Both remain sandbox previews. Deploy `backend/index.mjs` using
+Step 1 and merge/publish the frontend change. Existing routes, permissions and
+CORS can stay as they are. **Merging GitHub does not deploy Lambda.** Prefer to
+deploy Lambda first; the new frontend refuses an old backend response that cannot
+confirm the selected fulfillment mode.
 
-Checkout now sends `ask_for_shipping_address: true` to Square. This collects an
-address on the hosted checkout; it does not buy a UPS/USPS/FedEx label, calculate
-carrier rates, restrict shipping destinations or promise a delivery date. No
-shipping fee is configured pending the client's decision. Keep this sandbox-only
-until shipping areas, rates, taxes and fulfillment are agreed and implemented.
+Shipping sets `ask_for_shipping_address: true`; pickup sets it to `false` and
+creates a `PICKUP` fulfillment at the secret's sandbox location. Square collects
+contact details on its checkout. Pickup uses a **sample one-hour preparation time
+and one-hour pickup window**, with `ASAP` scheduling. These are test values, not
+client-approved hours or turnaround. The sandbox location address is also test
+data. No pickup reservation or real shipment is made.
 
-After deploying, start a new checkout attempt (reload the shop page) so it uses a
-new idempotency key and creates a link with the new options. Existing payment links
-are not changed by deploying this file. Check the preview as described in Step 5.
+No shipping fee, carrier rates, labels, destination restrictions or delivery dates
+are configured yet. Before production, agree shipping areas/rates and pickup
+location/hours/readiness with the client, then implement and verify those rules.
+This code deliberately rejects production credentials.
+
+Reload the shop and create a fresh link for each mode. Old links do not change
+when Lambda changes. Retries reuse the same key for the same mode; choosing the
+other mode uses a separate key. The server additionally scopes Square's key to
+the mode so a reused browser key cannot return a link for the wrong choice.
+
+Local regression tests (Node 24; no credentials or AWS SDK install needed):
+
+```bash
+node --experimental-vm-modules --test backend/index.test.mjs
+```
+
+These tests stub AWS/Square; they do not prove a live Square checkout works.
+After deployment, verify both hosted previews using Step 5.
 
 The remaining steps document initial setup and troubleshooting. AWS deployment is
 manual; repository changes do not mean that the running Lambda has been updated.
@@ -39,7 +57,7 @@ creates a sandbox payment link, and responses allow the GitHub Pages origin.
 ## Step 1 — put the new code on the Lambda
 
 `backend/index.mjs` in this repository is the complete replacement. It keeps
-`GET /products` and `POST /checkout` working and enables shipping-address collection.
+`GET /products` and `POST /checkout` working and adds the pickup/shipping choice.
 
 **Console:** Lambda → `all-star-players-square-api-sandbox` → **Code** tab →
 open `index.mjs` → select all → paste the new file over it → **Deploy**.
@@ -194,11 +212,11 @@ curl -i -H 'Origin: https://bellmorewebdesign.github.io' \
 the API-level configuration is missing. When both are present API Gateway's
 configuration is the one that takes effect.
 
-## Step 5 — check the shipping checkout preview
+## Step 5 — check both checkout previews
 
 ```bash
 curl -s -X POST -H 'content-type: application/json' \
-  -d '{"variationId":"T2APLGR5UFWGFELNUHGVNVI2","quantity":1,"idempotencyKey":"asp-shipping-preview-0001"}' \
+  -d '{"variationId":"T2APLGR5UFWGFELNUHGVNVI2","quantity":1,"fulfillment":"shipping","idempotencyKey":"asp-fulfillment-preview-0001"}' \
   https://n9ecaydkv4.execute-api.us-east-1.amazonaws.com/default/checkout
 ```
 
@@ -206,7 +224,7 @@ You want:
 
 ```json
 {"success":true,"environment":"sandbox",
- "checkoutUrl":"https://sandbox.square.link/u/XXXXXXXX",
+ "fulfillment":"shipping","checkoutUrl":"https://sandbox.square.link/u/XXXXXXXX",
  "orderId":"...","paymentLinkId":"..."}
 ```
 
@@ -217,13 +235,24 @@ failure. Do not claim a completed payment or look for a successful transaction
 based only on creating a link. Use a fresh idempotency key after changing checkout
 options, but reuse the same key when retrying an unchanged request.
 
+Repeat the request with `"fulfillment":"pickup"` and a new idempotency key.
+Expect `"fulfillment":"pickup"` in the response. Open its preview and check for
+store pickup, contact fields, sample location/time and no shipping-address form.
+If Square rejects the pickup request or the preview does not match, stop and
+inspect the returned `SQUARE_ERROR` details; do not treat link creation alone as
+proof that pickup works. No live pickup checkout has been verified by the local
+tests. The sandbox panel's payment simulation is separate from the disabled
+preview payment fields.
+
 Square references:
+- [Pickup fulfillment fields](https://developer.squareup.com/reference/square/objects/FulfillmentPickupDetails)
 - [CheckoutOptions: ask_for_shipping_address](https://developer.squareup.com/reference/square/objects/CheckoutOptions)
 - [Square support: disabled payment fields in sandbox hosted checkout](https://developer.squareup.com/forums/t/issue-with-credit-card-fields-and-pay-button-disabled-in-square-checkout-api-in-sandbox-enviornment/21045)
 
 Finally, load the real site at
 `https://bellmorewebdesign.github.io/AllStarPlayers/shop.html`, scroll to the
-test block and press **Preview Shipping Checkout**. It should take you to Square.
+test block, select each option and press **Preview Shipping Checkout** or
+**Preview Pickup Checkout**. Each should take you to the corresponding Square preview.
 If the block says "Could not reach the product service", open the browser
 console — a CORS message there means step 4 did not take.
 
@@ -239,8 +268,11 @@ Unchanged. Lists the sandbox catalog. Prices are in the smallest currency unit
 ### `POST /checkout`
 
 ```json
-{ "variationId": "T2APLGR5UFWGFELNUHGVNVI2", "quantity": 1, "idempotencyKey": "asp-…" }
+{ "variationId": "T2APLGR5UFWGFELNUHGVNVI2", "quantity": 1, "fulfillment": "shipping", "idempotencyKey": "asp-…" }
 ```
+
+`fulfillment` accepts `shipping` or `pickup`. Omission means shipping for older
+cached pages; any other value is `FULFILLMENT_NOT_ALLOWED`.
 
 The function refuses anything else — any other variation is
 `VARIATION_NOT_ALLOWED`, any quantity but 1 is `QUANTITY_NOT_ALLOWED`, and both
@@ -253,7 +285,7 @@ with `Square-Version: 2026-09-16` and:
 
 ```json
 {
-  "idempotency_key": "<yours, passed straight through>",
+  "idempotency_key": "<stable hash of browser key, mode, variation and quantity>",
   "order": {
     "location_id": "<SQUARE_LOCATION_ID from the secret>",
     "line_items": [{ "catalog_object_id": "T2APLGR5UFWGFELNUHGVNVI2", "quantity": "1" }]
@@ -262,9 +294,27 @@ with `Square-Version: 2026-09-16` and:
 }
 ```
 
+For pickup, the same order includes one fulfillment:
+
+```json
+{
+  "type": "PICKUP",
+  "state": "PROPOSED",
+  "pickup_details": {
+    "schedule_type": "ASAP",
+    "prep_time_duration": "PT1H",
+    "pickup_window_duration": "PT1H",
+    "note": "Sandbox preview only. Pickup times and location are test data; no real pickup is booked."
+  }
+}
+```
+
+Pickup also sets `ask_for_shipping_address: false`; no shipping fee is sent for
+either mode. Browser-supplied times, locations, fees and prices are ignored.
+
 No `redirect_url` is sent, so Square hosts the confirmation page as well.
 
-Back to the browser goes `{ success, environment, checkoutUrl, orderId,
+Back to the browser goes `{ success, environment, fulfillment, checkoutUrl, orderId,
 paymentLinkId }` — never the token, never the raw Square response.
 
 ### Safety rails
