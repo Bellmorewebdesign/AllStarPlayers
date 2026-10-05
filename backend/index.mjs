@@ -225,19 +225,18 @@ async function postCheckout(cfg, event) {
       type: 'PICKUP',
       state: 'PROPOSED',
       pickup_details: {
+        // Queue the order for staff to prepare. Do not promise a preparation
+        // duration or reserve a pickup appointment. Staff must contact the buyer
+        // when ready; this API integration does not send readiness notifications.
         schedule_type: 'ASAP',
-        // Sandbox sample only, not the store's actual turnaround or opening hours.
-        // Relative durations keep the request identical on idempotent retries.
-        prep_time_duration: 'PT1H',
-        pickup_window_duration: 'PT1H',
-        note: 'Sandbox preview only. Pickup times and location are test data; no real pickup is booked.'
+        note: 'Notify customer when ready; collect during store hours. Staff: contact the buyer using the order contact details before pickup. Sandbox preview only; do not send real messages for this test order.'
       }
     }];
   }
 
   // Separate choices even if a caller reuses a key. Never reuse a shipping link
   // for pickup, or an older shipping-only build's link for this request shape.
-  const squareKey = 'asp-fulfillment-v1-' + createHash('sha256')
+  const squareKey = 'asp-ready-pickup-v1-' + createHash('sha256')
     .update(JSON.stringify([idempotencyKey, fulfillment, ALLOWED_VARIATION_ID, ALLOWED_QUANTITY]))
     .digest('hex');
 
@@ -267,6 +266,7 @@ async function postCheckout(cfg, event) {
     success: true,
     environment: cfg.environment,
     fulfillment,
+    pickupPolicy: fulfillment === 'pickup' ? 'notify_when_ready' : null,
     checkoutUrl: link.url,
     orderId: link.order_id ?? null,
     paymentLinkId: link.id ?? null

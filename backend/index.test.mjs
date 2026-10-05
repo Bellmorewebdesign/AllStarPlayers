@@ -81,8 +81,11 @@ test('shipping collects an address; pickup sends a real fulfillment, with no bro
       assert.equal(pickup.type, 'PICKUP');
       assert.equal(pickup.state, 'PROPOSED');
       assert.equal(pickup.pickup_details.schedule_type, 'ASAP');
-      assert.equal(pickup.pickup_details.prep_time_duration, 'PT1H');
+      assert.equal(pickup.pickup_details.prep_time_duration, undefined);
+      assert.equal(pickup.pickup_details.pickup_window_duration, undefined);
       assert.equal(pickup.pickup_details.pickup_at, undefined);
+      assert.match(pickup.pickup_details.note, /Notify customer when ready/);
+      assert.equal(result.data.pickupPolicy, 'notify_when_ready');
     } else assert.equal(call.body.order.fulfillments, undefined);
   }
 });
