@@ -1,6 +1,6 @@
 # Deploying the Square sandbox backend
 
-## Pickup + shipping update (2026-10-04)
+## Notify-when-ready pickup update (2026-10-04)
 
 The shop now offers **Ship to me** (carrier shipping) and **Store pickup** before
 opening Square. Both remain sandbox previews. Deploy `backend/index.mjs` using
@@ -11,10 +11,21 @@ confirm the selected fulfillment mode.
 
 Shipping sets `ask_for_shipping_address: true`; pickup sets it to `false` and
 creates a `PICKUP` fulfillment at the secret's sandbox location. Square collects
-contact details on its checkout. Pickup uses a **sample one-hour preparation time
-and one-hour pickup window**, with `ASAP` scheduling. These are test values, not
-client-approved hours or turnaround. The sandbox location address is also test
-data. No pickup reservation or real shipment is made.
+contact details on its checkout. Pickup now uses this policy:
+
+> We’ll notify you when your order is ready. Collect during store hours.
+
+The request keeps `ASAP` to queue preparation, but omits `prep_time_duration`,
+`pickup_window_duration` and `pickup_at`. It no longer supplies the sample one-hour
+estimate or reserves an appointment. The sandbox location is still test data.
+Square controls its hosted page; check the fresh preview for any timing it renders
+rather than assuming omitting these fields changes every Square label.
+
+**Ready notifications are not automated in this build.** Staff must contact the
+buyer using the order contact details once it is packed and ready. The order's
+pickup note records that instruction. The sandbox UI explicitly says no pickup
+messages are sent, and no real customer should be contacted during preview tests.
+See the operational steps below before offering production pickup.
 
 No shipping fee, carrier rates, labels, destination restrictions or delivery dates
 are configured yet. Before production, agree shipping areas/rates and pickup
@@ -237,7 +248,11 @@ options, but reuse the same key when retrying an unchanged request.
 
 Repeat the request with `"fulfillment":"pickup"` and a new idempotency key.
 Expect `"fulfillment":"pickup"` in the response. Open its preview and check for
-store pickup, contact fields, sample location/time and no shipping-address form.
+store pickup, contact fields, the test location and no shipping-address form.
+The response must also contain `"pickupPolicy":"notify_when_ready"`; the frontend
+rejects older pickup responses so it cannot silently redirect to the previous
+one-hour-estimate checkout. Confirm the page does not give a conflicting firm
+pickup-time promise. If Square still renders a time, resolve that before launch.
 If Square rejects the pickup request or the preview does not match, stop and
 inspect the returned `SQUARE_ERROR` details; do not treat link creation alone as
 proof that pickup works. No live pickup checkout has been verified by the local
@@ -302,9 +317,7 @@ For pickup, the same order includes one fulfillment:
   "state": "PROPOSED",
   "pickup_details": {
     "schedule_type": "ASAP",
-    "prep_time_duration": "PT1H",
-    "pickup_window_duration": "PT1H",
-    "note": "Sandbox preview only. Pickup times and location are test data; no real pickup is booked."
+    "note": "Notify customer when ready; collect during store hours. Staff: contact the buyer using the order contact details before pickup. Sandbox preview only; do not send real messages for this test order."
   }
 }
 ```
@@ -314,7 +327,7 @@ either mode. Browser-supplied times, locations, fees and prices are ignored.
 
 No `redirect_url` is sent, so Square hosts the confirmation page as well.
 
-Back to the browser goes `{ success, environment, fulfillment, checkoutUrl, orderId,
+Back to the browser goes `{ success, environment, fulfillment, pickupPolicy, checkoutUrl, orderId,
 paymentLinkId }` — never the token, never the raw Square response.
 
 ### Safety rails
@@ -335,6 +348,29 @@ paymentLinkId }` — never the token, never the raw Square response.
 | `ALLOWED_VARIATION_ID` | `T2APLGR5UFWGFELNUHGVNVI2` | the only variation that may be sold |
 | `ALLOWED_ORIGINS` | the GitHub Pages origin + localhost | comma-separated, for the fallback CORS headers |
 | `SQUARE_VERSION` | `2026-09-16` | the `Square-Version` header |
+
+## Pickup staff workflow and notification setup
+
+The selected policy uses a readiness message rather than an appointment time.
+For production, assign responsibility for contacting buyers before publishing
+this promise. The steps are:
+
+1. Confirm payment succeeded and the order is a pickup order for the correct store.
+2. Locate and pack the item, then mark the pickup ready in Square.
+3. Contact the buyer using the email/phone on the order, with the pickup address
+   and current opening hours. Confirm that the message was sent; marking the order
+   ready alone is not proof of notification delivery.
+4. Complete the pickup in Square after handing over the item.
+
+No automated email/SMS service, sender identity or readiness webhook has been
+configured by this PR. Square's reviewed developer guidance says API order-status
+notifications need an application-managed sender:
+[Order Status Notifications](https://developer.squareup.com/forums/t/order-status-notifications/19083).
+Do not assume Square Online notification settings apply to API-created orders.
+Automatic notifications would require a verified Square webhook, reading the
+paid pickup order when it becomes ready, a configured email/SMS sender and
+retry/deduplication handling. A real notification-delivery test is required before
+claiming that automation works. This sandbox deployment does not send messages.
 
 ## Going past the test
 

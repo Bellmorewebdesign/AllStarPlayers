@@ -29,7 +29,7 @@
      same key as the same attempt, so a retry after a failure reuses it and
      cannot create a second order. It is thrown away once Square has given us
      a link, so the next visit starts a genuinely new attempt. */
-  var KEY_NAME = 'asp.sq.idem.fulfillment-v1.' + CFG.variationId + '.';
+  var KEY_NAME = 'asp.sq.idem.ready-pickup-v1.' + CFG.variationId + '.';
 
   /* ---------------------------------------------------------------- utils */
   function el(tag, cls, text) {
@@ -225,7 +225,7 @@
 
   function fulfillmentDetail(fulfillment) {
     return fulfillment === 'pickup'
-      ? 'Collect at the store. Any location or pickup time shown in this sandbox checkout is sample data.'
+      ? 'We’ll notify you when your order is ready. Collect during store hours. Please wait for your ready-for-pickup message before visiting. Sandbox preview: no pickup messages are sent.'
       : 'Delivery by mail or carrier. Shipping charges and delivery estimates are not yet set.';
   }
 
@@ -306,7 +306,8 @@
       if (res.ok && b && b.success === true && b.checkoutUrl) {
         // An older Lambda ignores the choice and always creates shipping links.
         // Stop here until the matching backend has been deployed.
-        if (b.fulfillment !== fulfillment || b.environment !== 'sandbox') {
+        if (b.fulfillment !== fulfillment || b.environment !== 'sandbox' ||
+            (fulfillment === 'pickup' && b.pickupPolicy !== 'notify_when_ready')) {
           fail(btn, status, err, 'The checkout service needs an update before it can confirm your pickup or shipping choice.', choices);
           return;
         }

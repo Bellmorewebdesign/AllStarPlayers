@@ -223,8 +223,10 @@ One product on the shop page opens a Square **sandbox hosted checkout preview**.
 Choose **Ship to me** or **Store pickup** before opening Square. Shipping collects
 an address; pickup creates a `PICKUP` fulfillment at the sandbox location. The
 preview cannot accept payments; nothing ships and no pickup is booked. Pickup
-uses a sample one-hour preparation time and one-hour pickup window, not the
-store's actual readiness policy. Shipping charges, carrier rates, labels and
+says “We’ll notify you when your order is ready. Collect during store hours.”
+There is no fixed pickup estimate or appointment. Ready notifications are not
+automated: staff must contact buyers when orders are ready before this policy is
+used in production. Sandbox previews send no messages. Shipping charges, carrier rates, labels and
 delivery estimates are not configured. Confirm shipping areas/rates and pickup
 location/hours/readiness with the client before preparing production checkout.
 
@@ -259,7 +261,8 @@ site only ever talks to our own AWS endpoints. Everything secret lives in the AW
   Square `PICKUP` fulfillment with shipping-address collection disabled.
 - No `shipping_fee` is sent while rates are undecided; this is not a free-shipping policy.
 - Retries preserve the key per fulfillment mode; changing modes cannot reuse a link
-  for the other mode. The frontend verifies the backend confirms the chosen mode.
+  for the other mode. The frontend verifies the backend confirms the chosen mode
+  and the notify-when-ready pickup policy.
 
 ### The picture
 
