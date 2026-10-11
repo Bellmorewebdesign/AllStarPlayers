@@ -8,7 +8,7 @@ Two static pages. No build step, no framework, no dependencies.
 | Page | File | What it is |
 | --- | --- | --- |
 | Home | `index.html` | Video header, what is on the floor, categories, the store, shop photos, authenticity, visit |
-| Shop | `shop.html` | The whole floor with search, category filters and sorting |
+| Shop | `shop.html` | In-stock snapshot, search, categories, prices and variation details |
 
 ---
 
@@ -35,86 +35,80 @@ of `tools/build-media.sh` so the loop still turns over cleanly.
 
 ---
 
-## Adding products, the only file you need
+## In-stock browsing catalog
 
-**Everything that looks like a product on this site comes from
-[`js/products.js`](js/products.js).** The row on the home page and the whole shop page both
-read that one array, so a product is only ever entered once.
+`shop.html` loads `js/stock-products.js`, a public snapshot of the October 11, 2026
+Square export for ALLSTAR PLAYERS: **870 product-name groups and 1,786 sellable
+variations with positive stock**. Two additional positive-stock variations were explicitly
+marked not sellable and are excluded. Zero, negative, blank and unknown quantities are
+excluded. A group can include only its in-stock sizes/colors; other variations do not appear.
 
-### 1. Add the photographs
+This is **browsing only**, not live Square inventory. The page and product dialogs show the
+snapshot date and ask customers to call to confirm stock. There is no cart or checkout on
+these real product cards. The separate sandbox checkout preview still uses the existing AWS
+API and test item. This change requires no Lambda deployment.
 
-Put them in `assets/img/products/`. Portrait crops around **1000 x 1250** (4:5) look best,
-because that is the shape of the card. Anything else gets cropped to fit.
+The shop supports search (names, descriptions and available options), category filters,
+name/price sorting, 36 cards at a time with Show More, and a keyboard-accessible details
+dialog containing the exported variation choices and their own prices. Prices in this
+static file are **USD dollars**, not Square API cents. A variable price appears as “Ask in
+store”; mixed known and variable prices show “From” on the card. No dates were present in
+the export, so Newest/New Arrivals are not offered.
 
-### 2. Add the entry
+### Refreshing the snapshot
 
-Open `js/products.js` and copy the template at the top of the file into the `ASP.items` array:
+Keep the original export outside this repository. It contains supplier costs and other
+internal data and must not be published. The importer reads it without editing it and
+writes only a whitelist of public retail fields. It does not copy vendor names, unit costs,
+SKUs, exact quantities, merchant credentials or account details into the website.
 
-```js
+From the repository root, using Python with `openpyxl` installed:
+
+```bash
+python tools/import-square-catalog.py /path/to/catalog.xlsx --date 2026-10-11
+python -m unittest discover -s tools -p 'test_*.py'
+```
+
+Use the actual export date, and `--location "LOCATION NAME"` if the stock-column suffix
+changes. Then update the date/product-count notice in `shop.html` and commit the generated
+`js/stock-products.js`. Do not edit that generated file directly. Sorting/grouping uses the
+trimmed Item Name because the export has variation IDs, not parent item IDs. These website
+group IDs are not Square catalog IDs. Each variation keeps its real catalog variation ID
+for a future production integration; never submit these to the sandbox checkout endpoint.
+
+The importer maps the export's categories into the filter groups and inherits categories
+from other rows of the same item when a size row is blank. Unmapped/uncategorized items go
+under Other. Review Other when refreshing; add mappings in `CATEGORY_GROUPS` as needed.
+Existing home-page category links still work.
+
+### Adding real product photos
+
+The export has no photos. Cards honestly say “Photo coming soon”; no rack or stock photo
+is presented as a photograph of a specific product. Add a verified product photo under
+`assets/img/products/`, find its stable `stock-...` ID in `js/stock-products.js`, and add it
+to `data/catalog-images.json`:
+
+```json
 {
-  id:            'asp-0001',                   // unique, never reused
-  name:          'Product name',
-  brand:         'Brand name',
-  category:      't-shirts',                   // a slug from ASP.categories
-  categories:    ['t-shirts','hats'],          // optional, if it fits more than one
-  price:         120,                          // leave it out and the card says "Ask in store"
-  originalPrice: 160,                          // optional, draws a strike-through
-  image:         'assets/img/products/x.jpg',
-  images:        ['assets/img/products/x-2.jpg'],  // first extra shot is the hover photo
-  alt:           'What the photograph shows',
-  description:   'A line or two.',
-  featured:      true,        // puts it in the row on the home page
-  bestSeller:    false,       // badge + the Best Sellers filter
-  newArrival:    true,        // badge + the New Arrivals filter
-  limited:       false,       // badge
-  sizes:         ['S','M','L','XL'],
-  colors:        [{ name:'Black', hex:'#101010' }, { name:'Bone', hex:'#F1EDE4' }],
-  soldOut:       false,       // greys the photo and stamps SOLD OUT
-  sortOrder:     10,          // low numbers come first under "Featured"
-  url:           ''           // optional link. Empty means the card is not clickable.
+  "stock-REPLACE_WITH_PRODUCT_ID": {
+    "image": "assets/img/products/verified-product.jpg",
+    "alt": "Description of the actual product photograph"
+  }
 }
 ```
 
-Save the file and refresh. There is nothing to install and nothing to compile.
+Run the importer again with the same export and date. It checks that each mapped photo is
+an existing product asset. Do not guess photo-to-product matches. Production Square
+Catalog image retrieval and live stock sync are follow-up work requiring the client's
+production credentials and location. Before enabling real checkout, stock and price must
+be verified on the server at order time.
 
-### 3. Clear the floor photos
+### Homepage floor photos
 
-The site currently ships **fourteen floor photos** instead of listings. They are real
-photographs of the store, tagged with the category they show. They invent nothing: no brand,
-no product name, no size, no price. Every one carries `floor: true` and they all sit together
-between two markers in `js/products.js`:
-
-```
-/* ===== FLOOR PHOTOS. DELETE THIS BLOCK WHEN THE REAL CATALOG LANDS ===== */
-...
-/* ===== END OF FLOOR PHOTOS ===== */
-```
-
-Delete that block in one go. The two "Photos, not listings" notices, on the home page and on
-the shop page, hide themselves the moment one real product exists.
-
-### Categories
-
-`ASP.categories` in the same file controls the filters on the shop page and the order they
-appear in. The seven that ship are the ones there are real photographs for:
-
-```
-t-shirts   hoodies-sweatshirts   pants   shorts   sneakers   hats   accessories
-```
-
-**New Arrivals** and **Best Sellers** are written into that list and commented off. They are
-*smart* categories: a product joins them through its `newArrival` / `bestSeller` flag rather
-than through `category`, so a tee can be a T-Shirt and a New Arrival at the same time. They
-are switched off today because a photograph of a rack cannot honestly claim to be either one.
-Uncomment those two lines as soon as real products start carrying the flags. **Jackets** is not
-in the list for the same reason: there is no jacket photograph yet, and a category link that
-lands on an empty page reads as broken. Add the line back with a photo.
-
-Category links use a query string and work from anywhere:
-`shop.html?category=t-shirts`, `shop.html?category=accessories`, `shop.html?q=cap&sort=name-asc`.
-
-The sort menu prunes itself. Price sorting only appears once something has a price, and Newest
-only once something has a `dateAdded`, so no control on the page does nothing.
+`js/products.js` still holds the fourteen verified store/rack photos used on `index.html`.
+The shop overrides that array with the snapshot, so these photographs are not confused
+with real product listings. Edit homepage photos in `products.js` as before. Their existing
+“Photos, not listings” notice remains.
 
 ---
 
@@ -157,7 +151,9 @@ css/
   shop.css              Shop header, filters, sorting, the phone drawer
   test-checkout.css     The Square sandbox test block on the shop page
 js/
-  products.js           <- the catalog. Add products here.
+  products.js           Homepage floor photographs and shared settings
+  stock-products.js     Generated public in-stock inventory snapshot
+  stock-catalog.js      Browsing-only variation details dialog
   catalog.js            Draws the cards, runs search, filters and sorting
   main.js               Sticky header, phone menu, scroll reveals, the video
   test-checkout.js      Fetches the one sandbox product and runs its Buy button
@@ -165,7 +161,11 @@ backend/
   index.mjs             The AWS Lambda behind both API endpoints
   DEPLOY.md             <- how to get it on AWS. Read this before touching AWS.
 tools/
-  build-media.sh        Regenerates assets/img and assets/video from the originals
+  build-media.sh        Regenerates store assets from the originals
+  import-square-catalog.py  Generates the public retail snapshot from a private export
+  test_import_square_catalog.py  Import selection/privacy checks
+data/
+  catalog-images.json   Verified product-photo mappings
 assets/
   brand/                Vector logo, favicons, web manifest, social share image
   fonts/                Self-hosted Boldonse + Instrument Sans (SIL OFL, licences included)
@@ -211,15 +211,15 @@ Three notes for whoever edits next:
   given. When they arrive, add hours to the Visit block in `index.html` and to the
   `openingHoursSpecification` of the `ClothingStore` JSON-LD block in the `<head>`.
 - Nothing in `js/products.js` quotes a price, and none of those cards offers to sell anything,
-  because there is no real checkout yet. Every "how much" route sends people to the phone
-  number or the door. The one exception is the Square **sandbox test block** on the shop page,
-  which is a test integration and says so in three places. See below.
+  because those are homepage rack photographs. The shop's `js/stock-products.js` quotes
+  real exported retail prices but remains browsing-only with a call-the-store action.
+  The separate Square sandbox preview is the only checkout integration. See below.
 
 ---
 
 ## The Square sandbox test
 
-One product on the shop page opens a Square **sandbox hosted checkout preview**.
+The expandable sandbox section below the catalog opens a Square **sandbox hosted checkout preview** for one test product.
 Choose **Ship to me** or **Store pickup** before opening Square. Shipping collects
 an address; pickup creates a `PICKUP` fulfillment at the sandbox location. The
 preview cannot accept payments; nothing ships and no pickup is booked. Pickup
