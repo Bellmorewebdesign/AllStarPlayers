@@ -3,3 +3,8 @@ __pycache__/
 # Keep private Square exports out of the public website repository.
 *.xlsx
 *.xls
+
+# backend dependencies are installed by `npm ci` at package time
+backend/node_modules/
+backend/build/
+backend/function.zip

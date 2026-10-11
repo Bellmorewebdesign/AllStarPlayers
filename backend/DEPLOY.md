@@ -1,380 +1,410 @@
-# Deploying the Square sandbox backend
+# Deploying the All Star Players store API
 
-## Notify-when-ready pickup update (2026-10-04)
+**Nothing in this document has been run.** The container this was built in has
+no access to your AWS account and no network route to Square at all — both
+`connect.squareup.com` and `connect.squareupsandbox.com` are blocked by its
+egress policy. So the code is finished and tested against doubles, and every
+step that touches your real account is yours to run.
 
-The shop now offers **Ship to me** (carrier shipping) and **Store pickup** before
-opening Square. Both remain sandbox previews. Deploy `backend/index.mjs` using
-Step 1 and merge/publish the frontend change. Existing routes, permissions and
-CORS can stay as they are. **Merging GitHub does not deploy Lambda.** Prefer to
-deploy Lambda first; the new frontend refuses an old backend response that cannot
-confirm the selected fulfillment mode.
-
-Shipping sets `ask_for_shipping_address: true`; pickup sets it to `false` and
-creates a `PICKUP` fulfillment at the secret's sandbox location. Square collects
-contact details on its checkout. Pickup now uses this policy:
-
-> We’ll notify you when your order is ready. Collect during store hours.
-
-The request keeps `ASAP` to queue preparation, but omits `prep_time_duration`,
-`pickup_window_duration` and `pickup_at`. It no longer supplies the sample one-hour
-estimate or reserves an appointment. The sandbox location is still test data.
-Square controls its hosted page; check the fresh preview for any timing it renders
-rather than assuming omitting these fields changes every Square label.
-
-**Ready notifications are not automated in this build.** Staff must contact the
-buyer using the order contact details once it is packed and ready. The order's
-pickup note records that instruction. The sandbox UI explicitly says no pickup
-messages are sent, and no real customer should be contacted during preview tests.
-See the operational steps below before offering production pickup.
-
-No shipping fee, carrier rates, labels, destination restrictions or delivery dates
-are configured yet. Before production, agree shipping areas/rates and pickup
-location/hours/readiness with the client, then implement and verify those rules.
-This code deliberately rejects production credentials.
-
-Reload the shop and create a fresh link for each mode. Old links do not change
-when Lambda changes. Retries reuse the same key for the same mode; choosing the
-other mode uses a separate key. The server additionally scopes Square's key to
-the mode so a reused browser key cannot return a link for the wrong choice.
-
-Local regression tests (Node 24; no credentials or AWS SDK install needed):
-
-```bash
-node --experimental-vm-modules --test backend/index.test.mjs
-```
-
-These tests stub AWS/Square; they do not prove a live Square checkout works.
-After deployment, verify both hosted previews using Step 5.
-
-The remaining steps document initial setup and troubleshooting. AWS deployment is
-manual; repository changes do not mean that the running Lambda has been updated.
-
-**What already exists** (confirmed working before these changes):
-
-| Thing | Value |
-| --- | --- |
-| Region | `us-east-1` |
-| Lambda | `all-star-players-square-api-sandbox`, Node.js 24, `index.mjs` |
-| HTTP API | `n9ecaydkv4`, stage `default`, auto-deploy on |
-| Secret | `all-star-players/square/sandbox` (Lambda env var `SECRET_ID` points at it) |
-| Sandbox location | `LPDXRBQ28WHB6` |
-| Live route | `GET https://n9ecaydkv4.execute-api.us-east-1.amazonaws.com/default/products` |
-
-**Already verified:** `GET /products` returns the test product, `POST /checkout`
-creates a sandbox payment link, and responses allow the GitHub Pages origin.
+Work the sandbox column first, prove a real test payment end to end, then do
+the production column. The two are separate secrets, separate functions and
+separate tables; nothing is shared.
 
 ---
 
-## Step 1 — put the new code on the Lambda
+## 0. What you must supply
 
-`backend/index.mjs` in this repository is the complete replacement. It keeps
-`GET /products` and `POST /checkout` working and adds the pickup/shipping choice.
+The storefront will not invent any of these. A fulfillment method that is not
+configured is **unavailable**, not free.
 
-**Console:** Lambda → `all-star-players-square-api-sandbox` → **Code** tab →
-open `index.mjs` → select all → paste the new file over it → **Deploy**.
+| # | Setting | Where it goes | What happens without it |
+| --- | --- | --- | --- |
+| 1 | **Production Square access token** | secret `SQUARE_ACCESS_TOKEN` | nothing works |
+| 2 | **Production location ID** — the real shop, see §3 | secret `SQUARE_LOCATION_ID` | nothing works |
+| 3 | **Webhook signature key** | secret `SQUARE_WEBHOOK_SIGNATURE_KEY` | order status still works by polling; webhooks are refused |
+| 4 | **Shipping rates and zones** | env `SHIPPING_RATES` | shipping is not offered at all |
+| 5 | **Pickup on/off + shop address** | env `PICKUP_ENABLED`, `PICKUP_ADDRESS` | pickup is not offered at all |
+| 6 | **Pickup policy wording** | env `PICKUP_POLICY` | falls back to "we will contact you when it is ready" |
+| 7 | **Do your Square tax rules cover online orders?** | checked by you in Square | see §8 — this one needs your eyes |
+| 8 | **Sell items Square is not counting?** | env `SELL_UNTRACKED_VARIATIONS` | off: untracked items are listed as "availability unknown" and cannot be bought |
 
-**CLI:**
+Decide #7 and #8 before you take a real payment.
+
+---
+
+## 1. Build the package
+
+The function is several modules plus the AWS SDK, so it ships as a zip rather
+than a console paste.
 
 ```bash
 cd backend
-zip function.zip index.mjs
-aws lambda update-function-code \
-  --function-name all-star-players-square-api-sandbox \
-  --zip-file fileb://function.zip \
+npm install           # once
+npm test              # 78 checks, all against doubles — see the report
+npm run package       # produces backend/function.zip
+```
+
+## 2. Create the DynamoDB table
+
+One table, on-demand, with a TTL attribute so nothing accumulates cost. Do
+this twice — once per environment.
+
+```bash
+for ENV in sandbox production; do
+aws dynamodb create-table \
+  --table-name "all-star-players-store-$ENV" \
+  --attribute-definitions AttributeName=pk,AttributeType=S AttributeName=sk,AttributeType=S \
+  --key-schema AttributeName=pk,KeyType=HASH AttributeName=sk,KeyType=RANGE \
+  --billing-mode PAY_PER_REQUEST \
   --region us-east-1
+aws dynamodb update-time-to-live \
+  --table-name "all-star-players-store-$ENV" \
+  --time-to-live-specification "Enabled=true,AttributeName=ttl" \
+  --region us-east-1
+done
 ```
 
-Then give it room to talk to Square. The Lambda default timeout is **3
-seconds**, which is not enough for creating a payment link:
+Every row carries a `ttl`: the catalog cache expires in minutes, idempotency
+records in 48 hours, webhook de-duplication keys in 7 days, stock holds in 15
+minutes, and order records after `ORDER_RETENTION_DAYS` (90 by default).
+
+## 3. Find the real production location ID
+
+**Do not assume the sandbox location `LPDXRBQ28WHB6` means anything in
+production.** It does not. Ask Square:
 
 ```bash
-aws lambda update-function-configuration \
-  --function-name all-star-players-square-api-sandbox \
-  --timeout 15 --region us-east-1
+curl -s https://connect.squareup.com/v2/locations \
+  -H "Authorization: Bearer $SQUARE_PRODUCTION_TOKEN" \
+  -H "Square-Version: 2026-09-16" \
+| python3 -m json.tool
 ```
 
-**Check it:**
+Pick the one whose `address` is 96-03 37th Ave and whose `status` is `ACTIVE`.
+That `id` is what goes in the secret. Getting this wrong means selling stock
+the shop does not have.
+
+## 4. Create the secrets
 
 ```bash
-curl -s https://n9ecaydkv4.execute-api.us-east-1.amazonaws.com/default/products
+# production
+aws secretsmanager create-secret \
+  --name all-star-players/square/production \
+  --region us-east-1 \
+  --secret-string '{
+    "SQUARE_ACCESS_TOKEN": "EAAAl...PRODUCTION...",
+    "SQUARE_APPLICATION_ID": "sq0idp-...",
+    "SQUARE_LOCATION_ID": "L...THE REAL ONE FROM STEP 3...",
+    "SQUARE_ENVIRONMENT": "production",
+    "SQUARE_WEBHOOK_SIGNATURE_KEY": "...from the webhook subscription...",
+    "ADMIN_REFRESH_KEY": "...any long random string you choose..."
+  }'
 ```
 
-You should get the same JSON as before — `"Sandbox Test Sneaker"`, price
-`10000`. If you instead get a 502 or a `SERVER_ERROR`, open CloudWatch Logs for
-the function and look at the newest log stream.
+Do the same with `all-star-players/square/sandbox` and
+`"SQUARE_ENVIRONMENT": "sandbox"`.
 
-> **If the log says `Cannot find module '@aws-sdk/client-secrets-manager'`**
-> the runtime is not shipping the AWS SDK and you need to bundle it:
->
-> ```bash
-> cd backend
-> npm init -y
-> npm install @aws-sdk/client-secrets-manager
-> zip -r function.zip index.mjs node_modules package.json
-> aws lambda update-function-code \
->   --function-name all-star-players-square-api-sandbox \
->   --zip-file fileb://function.zip --region us-east-1
-> ```
+The function refuses to start if `SQUARE_ENVIRONMENT` is anything but
+`sandbox` or `production`, and refuses outright if the secret says production
+but the token looks like a sandbox one. A sandbox token cannot reach the
+production host: the base URL is derived from the environment, not configured
+separately.
 
-## Step 2 — add the POST /checkout route
+## 5. Create the Lambda functions
 
-The route key does **not** include the stage. `POST /checkout` is what answers
-`https://.../default/checkout`.
-
-**Console:** API Gateway → APIs → the API with ID `n9ecaydkv4` → **Routes** →
-**Create** → Method `POST`, path `/checkout` → **Create**. Then click the new
-route → **Attach integration** → pick the *existing* Lambda integration (the
-one `GET /products` already uses) → **Attach integration**.
-
-**CLI:**
-
-```bash
-# 1. find the integration GET /products already uses
-aws apigatewayv2 get-routes --api-id n9ecaydkv4 --region us-east-1 \
-  --query 'Items[].{route:RouteKey,target:Target}' --output table
-# -> target looks like  integrations/abc1234
-
-# 2. create the route against that same integration
-aws apigatewayv2 create-route --api-id n9ecaydkv4 --region us-east-1 \
-  --route-key 'POST /checkout' \
-  --target integrations/abc1234          # <- paste the id from step 1
-```
-
-Auto-deploy is on for the `default` stage, so there is nothing to publish.
-
-## Step 3 — let API Gateway invoke the Lambda for the new route
-
-A route created in the console usually adds this for you. A route created with
-the CLI never does. Look at the function's resource policy first:
-
-```bash
-aws lambda get-policy \
-  --function-name all-star-players-square-api-sandbox \
-  --region us-east-1 --query Policy --output text | python3 -m json.tool
-```
-
-Read the `SourceArn` values. If one of them ends in `n9ecaydkv4/*/*/*` or
-`n9ecaydkv4/*`, you are already covered and can skip to step 4. If they are all
-specific to `GET/products`, add one:
+Two functions, same zip, different environment variables.
 
 ```bash
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-aws lambda add-permission \
-  --function-name all-star-players-square-api-sandbox \
-  --statement-id apigw-post-checkout \
-  --action lambda:InvokeFunction \
-  --principal apigateway.amazonaws.com \
-  --source-arn "arn:aws:execute-api:us-east-1:${ACCOUNT_ID}:n9ecaydkv4/*/POST/checkout" \
+
+aws lambda create-function \
+  --function-name all-star-players-store-production \
+  --runtime nodejs24.x --handler index.handler \
+  --role "arn:aws:iam::${ACCOUNT_ID}:role/all-star-players-store-production-role" \
+  --zip-file fileb://function.zip \
+  --timeout 25 --memory-size 512 \
   --region us-east-1
 ```
 
-(`ResourceConflictException` means the statement id is already there — fine.)
+**Timeout 25 seconds, not the 3-second default.** A cold catalog fetch walks
+several pages of Square's catalog and several inventory batches.
 
-**Check it:** this should now come back **400**, not 404. A 400 is the right
-answer: the route is live, the Lambda ran, and it refused an empty body.
-
-```bash
-curl -i -X POST -H 'content-type: application/json' -d '{}' \
-  https://n9ecaydkv4.execute-api.us-east-1.amazonaws.com/default/checkout
-```
-
-A 500 with `"CONFIG_ERROR"` means the route works but the secret is wrong —
-the message names the key at fault.
-
-## Step 4 — turn on CORS for the website's origin
-
-CORS is already configured for GitHub Pages. If rebuilding the API, configure it
-here so browser requests can read the responses. The origin is the **bare host**, with no repository
-path on the end — a browser never sends one.
-
-**Console:** API Gateway → `n9ecaydkv4` → **CORS** → **Configure**:
-
-| Field | Value |
-| --- | --- |
-| Access-Control-Allow-Origin | `https://bellmorewebdesign.github.io` |
-| Access-Control-Allow-Methods | `GET`, `POST`, `OPTIONS` |
-| Access-Control-Allow-Headers | `content-type` |
-| Access-Control-Max-Age | `600` |
-
-**CLI:**
+Then the configuration. This is the part you will come back and edit:
 
 ```bash
-aws apigatewayv2 update-api --api-id n9ecaydkv4 --region us-east-1 \
-  --cors-configuration '{"AllowOrigins":["https://bellmorewebdesign.github.io"],"AllowMethods":["GET","POST","OPTIONS"],"AllowHeaders":["content-type"],"MaxAge":300}'
+aws lambda update-function-configuration \
+  --function-name all-star-players-store-production \
+  --region us-east-1 \
+  --environment 'Variables={
+    SECRET_ID=all-star-players/square/production,
+    TABLE_NAME=all-star-players-store-production,
+    ALLOWED_ORIGINS=https://bellmorewebdesign.github.io,
+    RETURN_URL=https://bellmorewebdesign.github.io/AllStarPlayers/order.html,
+    WEBHOOK_NOTIFICATION_URL=https://REPLACE.execute-api.us-east-1.amazonaws.com/default/webhooks/square,
+
+    PICKUP_ENABLED=true,
+    PICKUP_ADDRESS=96-03 37th Ave\, Queens\, NY 11368,
+
+    SHIPPING_ENABLED=true,
+    SHIPPING_RATES=[{"id":"ny"\,"label":"New York"\,"amount":800\,"currency":"USD"\,"countries":["US"]\,"states":["NY"\,"NJ"\,"CT"]\,"freeOver":15000}\,{"id":"us"\,"label":"United States"\,"amount":1400\,"currency":"USD"\,"countries":["US"]\,"states":[]}],
+
+    CATALOG_TTL_SECONDS=600,
+    SELL_UNTRACKED_VARIATIONS=false,
+    STOCK_HOLDS_ENABLED=true,
+    STOCK_HOLD_SECONDS=900,
+    APPLY_CATALOG_TAXES=true,
+    STORE_NAME=All Star Players,
+    STORE_PHONE=+17185051038
+  }'
 ```
 
-**Check it.** Both of these must print an
-`access-control-allow-origin: https://bellmorewebdesign.github.io` line:
+Commas inside the JSON need escaping on the CLI; the console is easier for
+`SHIPPING_RATES`. Paste it there as plain JSON.
 
-```bash
-# the preflight the browser sends before the POST
-curl -i -X OPTIONS \
-  -H 'Origin: https://bellmorewebdesign.github.io' \
-  -H 'Access-Control-Request-Method: POST' \
-  -H 'Access-Control-Request-Headers: content-type' \
-  https://n9ecaydkv4.execute-api.us-east-1.amazonaws.com/default/checkout
-
-# and the real request
-curl -i -H 'Origin: https://bellmorewebdesign.github.io' \
-  https://n9ecaydkv4.execute-api.us-east-1.amazonaws.com/default/products
-```
-
-`index.mjs` also sets these headers itself, as a safety net for the case where
-the API-level configuration is missing. When both are present API Gateway's
-configuration is the one that takes effect.
-
-## Step 5 — check both checkout previews
-
-```bash
-curl -s -X POST -H 'content-type: application/json' \
-  -d '{"variationId":"T2APLGR5UFWGFELNUHGVNVI2","quantity":1,"fulfillment":"shipping","idempotencyKey":"asp-fulfillment-preview-0001"}' \
-  https://n9ecaydkv4.execute-api.us-east-1.amazonaws.com/default/checkout
-```
-
-You want:
-
-```json
-{"success":true,"environment":"sandbox",
- "fulfillment":"shipping","checkoutUrl":"https://sandbox.square.link/u/XXXXXXXX",
- "orderId":"...","paymentLinkId":"..."}
-```
-
-Open that URL and choose the checkout preview if Square first shows a testing
-panel. Verify the correct item, $100 price and shipping-address fields. The
-preview's card fields and Pay button are disabled: this is expected, not a Lambda
-failure. Do not claim a completed payment or look for a successful transaction
-based only on creating a link. Use a fresh idempotency key after changing checkout
-options, but reuse the same key when retrying an unchanged request.
-
-Repeat the request with `"fulfillment":"pickup"` and a new idempotency key.
-Expect `"fulfillment":"pickup"` in the response. Open its preview and check for
-store pickup, contact fields, the test location and no shipping-address form.
-The response must also contain `"pickupPolicy":"notify_when_ready"`; the frontend
-rejects older pickup responses so it cannot silently redirect to the previous
-one-hour-estimate checkout. Confirm the page does not give a conflicting firm
-pickup-time promise. If Square still renders a time, resolve that before launch.
-If Square rejects the pickup request or the preview does not match, stop and
-inspect the returned `SQUARE_ERROR` details; do not treat link creation alone as
-proof that pickup works. No live pickup checkout has been verified by the local
-tests. The sandbox panel's payment simulation is separate from the disabled
-preview payment fields.
-
-Square references:
-- [Pickup fulfillment fields](https://developer.squareup.com/reference/square/objects/FulfillmentPickupDetails)
-- [CheckoutOptions: ask_for_shipping_address](https://developer.squareup.com/reference/square/objects/CheckoutOptions)
-- [Square support: disabled payment fields in sandbox hosted checkout](https://developer.squareup.com/forums/t/issue-with-credit-card-fields-and-pay-button-disabled-in-square-checkout-api-in-sandbox-enviornment/21045)
-
-Finally, load the real site at
-`https://bellmorewebdesign.github.io/AllStarPlayers/shop.html`, scroll to the
-test block, select each option and press **Preview Shipping Checkout** or
-**Preview Pickup Checkout**. Each should take you to the corresponding Square preview.
-If the block says "Could not reach the product service", open the browser
-console — a CORS message there means step 4 did not take.
-
----
-
-## What the endpoints do
-
-### `GET /products`
-
-Unchanged. Lists the sandbox catalog. Prices are in the smallest currency unit
-(`10000` is $100.00); the browser formats them.
-
-### `POST /checkout`
-
-```json
-{ "variationId": "T2APLGR5UFWGFELNUHGVNVI2", "quantity": 1, "fulfillment": "shipping", "idempotencyKey": "asp-…" }
-```
-
-`fulfillment` accepts `shipping` or `pickup`. Omission means shipping for older
-cached pages; any other value is `FULFILLMENT_NOT_ALLOWED`.
-
-The function refuses anything else — any other variation is
-`VARIATION_NOT_ALLOWED`, any quantity but 1 is `QUANTITY_NOT_ALLOWED`, and both
-are rejected before Square is called. **No price is ever read from the request
-body.** The line item names the catalog variation and Square prices it from its
-own catalog, so a tampered-with browser cannot change the total.
-
-It then calls `POST https://connect.squareupsandbox.com/v2/online-checkout/payment-links`
-with `Square-Version: 2026-09-16` and:
-
-```json
-{
-  "idempotency_key": "<stable hash of browser key, mode, variation and quantity>",
-  "order": {
-    "location_id": "<SQUARE_LOCATION_ID from the secret>",
-    "line_items": [{ "catalog_object_id": "T2APLGR5UFWGFELNUHGVNVI2", "quantity": "1" }]
-  },
-  "checkout_options": { "allow_tipping": false, "ask_for_shipping_address": true }
-}
-```
-
-For pickup, the same order includes one fulfillment:
-
-```json
-{
-  "type": "PICKUP",
-  "state": "PROPOSED",
-  "pickup_details": {
-    "schedule_type": "ASAP",
-    "note": "Notify customer when ready; collect during store hours. Staff: contact the buyer using the order contact details before pickup. Sandbox preview only; do not send real messages for this test order."
-  }
-}
-```
-
-Pickup also sets `ask_for_shipping_address: false`; no shipping fee is sent for
-either mode. Browser-supplied times, locations, fees and prices are ignored.
-
-No `redirect_url` is sent, so Square hosts the confirmation page as well.
-
-Back to the browser goes `{ success, environment, fulfillment, pickupPolicy, checkoutUrl, orderId,
-paymentLinkId }` — never the token, never the raw Square response.
-
-### Safety rails
-
-- `SQUARE_ENVIRONMENT` in the secret must read `sandbox`. Anything else and
-  every request fails with `CONFIG_ERROR` before Square is contacted. This is
-  deliberate: it cannot be pointed at production by accident.
-- The access token is read from Secrets Manager, cached in memory for the life
-  of the container, and never logged or returned.
-- Square's own error objects are passed back (they carry no credentials) so a
-  failure is debuggable; everything else becomes a flat `SERVER_ERROR`.
-
-### Configuration knobs (Lambda environment variables, all optional)
+### Every setting
 
 | Variable | Default | What it does |
 | --- | --- | --- |
-| `SECRET_ID` | *(required, already set)* | which Secrets Manager secret to read |
-| `ALLOWED_VARIATION_ID` | `T2APLGR5UFWGFELNUHGVNVI2` | the only variation that may be sold |
-| `ALLOWED_ORIGINS` | the GitHub Pages origin + localhost | comma-separated, for the fallback CORS headers |
-| `SQUARE_VERSION` | `2026-09-16` | the `Square-Version` header |
+| `SECRET_ID` | *(required)* | which Secrets Manager secret to read |
+| `TABLE_NAME` | *(required)* | the DynamoDB table |
+| `ALLOWED_ORIGINS` | the GitHub Pages origin | comma-separated, for the fallback CORS headers |
+| `RETURN_URL` | the order page on GitHub Pages | where Square sends the buyer back |
+| `WEBHOOK_NOTIFICATION_URL` | *(none)* | must match the URL registered in Square **exactly**, or every signature fails |
+| `PICKUP_ENABLED` / `PICKUP_ADDRESS` / `PICKUP_POLICY` | off | pickup is offered only with both of the first two |
+| `SHIPPING_ENABLED` / `SHIPPING_RATES` | off | shipping is offered only with a valid rates array |
+| `SELL_UNTRACKED_VARIATIONS` | `false` | whether items Square is not counting can be bought |
+| `STOCK_HOLDS_ENABLED` / `STOCK_HOLD_SECONDS` | on / 900 | the soft hold, see §9 |
+| `CATALOG_TTL_SECONDS` | 600 | how stale browsing may be; checkout always revalidates |
+| `APPLY_CATALOG_TAXES` | `true` | attach the shop's own Square tax rules to the order |
+| `SQUARE_ASK_FOR_SHIPPING_ADDRESS` | `false` | see §7 |
+| `ORDER_RETENTION_DAYS` | 90 | how long order rows live |
+| `MAX_CART_LINES` / `MAX_LINE_QUANTITY` | 40 / 20 | ceilings |
 
-## Pickup staff workflow and notification setup
+## 6. IAM: the narrowest policy that works
 
-The selected policy uses a readiness message rather than an appointment time.
-For production, assign responsibility for contacting buyers before publishing
-this promise. The steps are:
+The function reads one secret and uses one table. Nothing else.
 
-1. Confirm payment succeeded and the order is a pickup order for the correct store.
-2. Locate and pack the item, then mark the pickup ready in Square.
-3. Contact the buyer using the email/phone on the order, with the pickup address
-   and current opening hours. Confirm that the message was sent; marking the order
-   ready alone is not proof of notification delivery.
-4. Complete the pickup in Square after handing over the item.
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "Logs",
+      "Effect": "Allow",
+      "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
+      "Resource": "arn:aws:logs:us-east-1:ACCOUNT_ID:log-group:/aws/lambda/all-star-players-store-production:*"
+    },
+    {
+      "Sid": "ReadOneSecret",
+      "Effect": "Allow",
+      "Action": ["secretsmanager:GetSecretValue"],
+      "Resource": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:all-star-players/square/production-*"
+    },
+    {
+      "Sid": "OneTable",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem", "dynamodb:Query", "dynamodb:BatchWriteItem"
+      ],
+      "Resource": "arn:aws:dynamodb:us-east-1:ACCOUNT_ID:table/all-star-players-store-production"
+    }
+  ]
+}
+```
 
-No automated email/SMS service, sender identity or readiness webhook has been
-configured by this PR. Square's reviewed developer guidance says API order-status
-notifications need an application-managed sender:
-[Order Status Notifications](https://developer.squareup.com/forums/t/order-status-notifications/19083).
-Do not assume Square Online notification settings apply to API-created orders.
-Automatic notifications would require a verified Square webhook, reading the
-paid pickup order when it becomes ready, a configured email/SMS sender and
-retry/deduplication handling. A real notification-delivery test is required before
-claiming that automation works. This sandbox deployment does not send messages.
+No `dynamodb:Scan`, no `secretsmanager:*`, no wildcard resources. The sandbox
+role is the same with `sandbox` substituted.
 
-## Going past the test
+## 7. API Gateway: routes, CORS and the stage prefix
 
-Before this is ever more than a test, at minimum: a webhook or an
-`RetrieveOrder` call to confirm payment server-side rather than trusting the
-redirect, real stock and shipping, and a second look at the "only one variation,
-only quantity 1" rails, which exist precisely because this is a test.
+Reuse the existing HTTP API `n9ecaydkv4` for sandbox if you like; make a
+second API for production so the two cannot be confused.
+
+**The route keys do not include the stage.** `GET /catalog` is what answers
+`https://.../default/catalog`. The function strips the stage prefix itself, so
+it works on a named stage or on `$default`.
+
+```bash
+API=n9ecaydkv4
+FN=arn:aws:lambda:us-east-1:ACCOUNT_ID:function:all-star-players-store-sandbox
+
+INT=$(aws apigatewayv2 create-integration --api-id $API --region us-east-1 \
+  --integration-type AWS_PROXY --payload-format-version 2.0 \
+  --integration-uri "$FN" --query IntegrationId --output text)
+
+for ROUTE in "GET /config" "GET /catalog" "POST /catalog/refresh" \
+             "POST /cart/validate" "POST /checkout" "GET /order" \
+             "POST /webhooks/square"; do
+  aws apigatewayv2 create-route --api-id $API --region us-east-1 \
+    --route-key "$ROUTE" --target "integrations/$INT"
+done
+
+aws lambda add-permission \
+  --function-name all-star-players-store-sandbox \
+  --statement-id apigw-store --action lambda:InvokeFunction \
+  --principal apigateway.amazonaws.com \
+  --source-arn "arn:aws:execute-api:us-east-1:ACCOUNT_ID:$API/*/*/*" \
+  --region us-east-1
+```
+
+Delete the old `GET /products` and `POST /checkout` single-item routes once
+the new ones answer, or leave `/products` as a dead end — nothing calls it.
+
+CORS, on the API itself:
+
+```bash
+aws apigatewayv2 update-api --api-id $API --region us-east-1 \
+  --cors-configuration AllowOrigins=https://bellmorewebdesign.github.io,\
+AllowMethods=GET,AllowMethods=POST,AllowMethods=OPTIONS,\
+AllowHeaders=content-type,MaxAge=600
+```
+
+The origin is the bare host with **no repository path** — a browser never
+sends one. Check it:
+
+```bash
+curl -i -H 'Origin: https://bellmorewebdesign.github.io' \
+  https://$API.execute-api.us-east-1.amazonaws.com/default/config
+```
+
+You want an `access-control-allow-origin` line back.
+
+### Hosted checkout and the shipping address — verify this in sandbox
+
+The order carries a `SHIPMENT` fulfillment with the recipient and address this
+service validated, and `ask_for_shipping_address` is **off**, so there is one
+source of truth for where the parcel goes.
+
+**Check in sandbox** that the address appears on the order in the Square
+dashboard after a test payment. If it does not come through, set
+`SQUARE_ASK_FOR_SHIPPING_ADDRESS=true` and Square's own page will collect it
+instead. This is flagged rather than assumed because Square's hosted checkout
+behaviour around pre-set fulfillments is the one part of this that could not be
+verified against the live API or the current documentation from here.
+
+Square's hosted page does **not** let the buyer choose pickup versus shipping.
+That choice is made on our cart page and baked into the order, which is why
+the two produce different orders and different idempotency keys.
+
+## 8. Tax — the one you must check yourself
+
+`APPLY_CATALOG_TAXES=true` makes the order name the shop's own Square `TAX`
+objects, taken from each item's `tax_ids`, and Square computes the amount. **No
+rate is hardcoded anywhere in this code**, and there is no destination-based
+tax calculation.
+
+What to check before going live:
+
+1. In Square → Settings → Taxes, confirm the tax that should apply to online
+   orders exists, is enabled, and is attached to the items you sell.
+2. Take one sandbox payment and compare the tax on the Square order with what
+   an in-store sale of the same item charges.
+3. If your items have no tax attached in Square, the order will carry no tax.
+   That is Square's configuration, not a bug here — fix it in Square.
+
+If you need destination-based sales tax for shipped orders, that is not built
+and would need Square's tax settings extended or a tax service added. Say so
+and it can be scoped.
+
+## 9. Overselling — what is and is not protected
+
+Plainly: **a stock check is not a reservation, and this does not guarantee
+stock.**
+
+What is implemented: a soft hold. When a checkout is created, the quantities
+go into DynamoDB for `STOCK_HOLD_SECONDS` (15 minutes). While that hold lives,
+*this website* subtracts it from what it offers other shoppers, so two
+browsers cannot both be promised the last unit.
+
+What that does not cover:
+
+- **An in-store sale.** The shop sells the same rail to whoever is standing
+  there. Square has no API to reserve catalog stock for a hosted checkout, so
+  nothing here can stop that.
+- **A hold expiring** before the customer finishes paying on Square's page.
+- **Square's own inventory** is decremented when the payment completes, not
+  when the link is made.
+
+If a sale goes through for stock that is gone, Square takes the payment and
+staff deal with it as a refund or a backorder — the same as any shop. If that
+is not acceptable, the next step up is Square's inventory adjustment API to
+move stock into a held state at checkout and move it back on expiry, which is
+a real piece of work and needs its own reconciliation. Not built; not claimed.
+
+Inventory is never adjusted by this code. Square decrements catalog stock
+itself when an order with catalog line items is paid, so touching it here
+would take the same units off the shelf twice.
+
+## 10. Webhooks
+
+In Square → Developer → Webhooks → Subscriptions, add a subscription to
+`https://<your api>/default/webhooks/square` for at least:
+
+- `payment.created`, `payment.updated`
+- `order.updated`
+
+Copy the **signature key** into the secret as `SQUARE_WEBHOOK_SIGNATURE_KEY`,
+and put the exact same notification URL into `WEBHOOK_NOTIFICATION_URL`. The
+signature is an HMAC over that URL plus the body, so one character of
+difference fails every delivery.
+
+The endpoint verifies the signature in constant time, de-duplicates on
+`event_id`, ignores orders this website did not create, and never lets a late
+"pending" event walk a paid order backwards.
+
+Webhooks are an optimisation, not a dependency: the return page also asks
+Square directly, so order status is correct even before a webhook lands.
+
+## 11. The front end
+
+The static site is unchanged in how it deploys — GitHub Pages, no build step.
+The only thing to set is the API base, at the top of `js/store-api.js`:
+
+```js
+var API_BASE = window.ASP_API_BASE ||
+  'https://n9ecaydkv4.execute-api.us-east-1.amazonaws.com/default';
+```
+
+Point it at the production API when you cut over.
+
+---
+
+## Sandbox checks, in order
+
+Do all of these in sandbox before touching production.
+
+1. `GET /config` returns the fulfillment methods you configured, and no ids or
+   tokens.
+2. `GET /catalog` returns products, and `?cursor=` walks to the end.
+3. The shop page lists the sandbox catalog with real photos where Square has
+   them.
+4. Add two different variations of one item; they stay separate lines.
+5. Check out with pickup. Pay with the sandbox test card `4111 1111 1111 1111`,
+   any future expiry, CVV `111`, ZIP `94103`.
+6. **In the Square sandbox dashboard:** the order appears under the right
+   location, with the right lines, the pickup fulfillment, and the customer's
+   contact details on it.
+7. Check out with shipping. Confirm the shipping charge is on the order as a
+   service charge and **the address came through** (§7).
+8. Confirm tax on the order matches what you expect (§8).
+9. Let the webhook fire; the order page should go from "checking" to
+   "Payment confirmed" without a reload.
+10. Cancel a payment instead of paying; the order page says cancelled and the
+    cart is still there.
+11. Press Pay twice quickly: one order, not two.
+12. Confirm inventory went down by the right amount in Square, once.
+
+## Going live
+
+1. Repeat §2, §4, §5, §6, §7 with `production`.
+2. Point `js/store-api.js` at the production API and push.
+3. Buy one cheap real item yourself, with a real card. Refund it in Square.
+4. Watch CloudWatch for the first day.
+
+## Costs
+
+Everything is serverless and on-demand. The catalog is cached in DynamoDB and
+in Lambda memory, so a busy day costs a handful of Square API calls rather than
+one per visitor. At this shop's volume expect the AWS bill to be cents a month;
+the Secrets Manager secret (about $0.40/month each) is the largest fixed line.

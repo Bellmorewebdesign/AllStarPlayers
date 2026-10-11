@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Browse the Catalog | All Star Players, Queens</title>
-<meta name="description" content="Browse All Star Players' October 11 inventory catalog. Find available clothing, sneakers and accessories, view options and prices, and call the Queens store to confirm stock.">
+<meta name="description" content="Shop All Star Players online. Streetwear, sneakers, hats and accessories from our Queens store, with collection in store or shipping to your door.">
 <meta name="theme-color" content="#0A0A0A">
 <meta name="author" content="All Star Players">
 
@@ -37,7 +37,7 @@
 <link rel="stylesheet" href="css/base.css">
 <link rel="stylesheet" href="css/catalog.css">
 <link rel="stylesheet" href="css/shop.css">
-<link rel="stylesheet" href="css/test-checkout.css">
+<link rel="stylesheet" href="css/store.css">
 <script>
   document.documentElement.className = document.documentElement.className.replace('no-js', 'js');
   /* Open every visit at the top of the page, not wherever the browser
@@ -85,6 +85,16 @@
       </span>
     </a>
 
+    <a class="cart-btn header__cart" href="cart.html" data-cart-button aria-label="Cart, empty">
+      <svg class="cart-btn__ico" viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+        <path d="M1.6 2.4h2.3l2.2 9.6h8.5l1.9-6.9H6.1" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <circle cx="7.6" cy="16.2" r="1.5" fill="currentColor"/>
+        <circle cx="14.6" cy="16.2" r="1.5" fill="currentColor"/>
+      </svg>
+      <span class="cart-btn__label">Cart</span>
+      <span class="cart-btn__count" data-cart-count hidden>0</span>
+    </a>
+
     <button class="nav-toggle" type="button" data-nav-toggle aria-expanded="false" aria-controls="site-nav" aria-label="Open menu">
       <span class="nav-toggle__box" aria-hidden="true">
         <span class="nav-toggle__bar"></span><span class="nav-toggle__bar"></span><span class="nav-toggle__bar"></span>
@@ -128,10 +138,10 @@
 
       <div class="shop-head__row">
         <div>
-          <p class="eyebrow" style="margin-bottom:16px">Find your next piece</p>
-          <h1 id="shop-title" class="foil" data-foil>Browse the Catalog</h1>
+          <p class="eyebrow" style="margin-bottom:16px">Shop online</p>
+          <h1 id="shop-title" class="foil" data-foil>Shop the Floor</h1>
         </div>
-        <p>Tees, fleece, denim, sneakers and the small stuff. Browse the pieces listed in stock, then check their available options and prices.</p>
+        <p>Tees, fleece, bottoms, sneakers, hats and the small stuff. Prices and stock come straight from the store system, and you can collect in store or have it shipped.</p>
       </div>
     </div>
   </section>
@@ -158,8 +168,7 @@
           <div class="select">
             <label for="shop-sort">Sort by</label>
             <select id="shop-sort" name="sort">
-              <option value="featured">Name: A–Z</option>
-              <option value="newest">Newest</option>
+              <option value="name-asc">Name: A to Z</option>
               <option value="price-asc">Price: Low to High</option>
               <option value="price-desc">Price: High to Low</option>
             </select>
@@ -203,12 +212,10 @@
   <section class="wrap results" aria-labelledby="results-title">
     <h2 id="results-title" class="vis-hidden">Product catalog</h2>
 
-    <p class="floor-flag">
-      <b>Inventory snapshot · October 11, 2026</b>
-      <span>870 products were listed in stock when this catalog was updated. Stock and prices can change. Online ordering is coming soon; call <a href="tel:+17185051038">(718) 505-1038</a> to confirm availability. Product photos are coming soon.</span>
-    </p>
+    <!-- Loading, stale-cache and failure states are written here by js/store.js. -->
+    <div class="catalog-status" data-catalog-status hidden></div>
 
-    <!-- Public retail data from the Square export, loaded by js/stock-products.js. -->
+    <!-- Drawn by js/store.js from GET /catalog on our AWS API. Nothing is hardcoded. -->
     <div class="product-grid" data-shop-grid></div>
     <div class="catalog-more"><button class="btn btn--ghost" type="button" data-load-more hidden>Show more products</button></div>
 
@@ -229,68 +236,6 @@
       </div>
     </noscript>
   </section>
-
-  <dialog class="stock-dialog" data-product-dialog aria-labelledby="product-title">
-    <button class="stock-dialog__close" type="button" data-product-close aria-label="Close product details" autofocus>✕</button>
-    <div class="stock-dialog__layout">
-      <div class="stock-dialog__media">
-        <img data-product-image hidden alt="">
-        <div class="stock-dialog__placeholder" data-product-placeholder>
-          <svg viewBox="0 0 690.8 823.4" aria-hidden="true"><path fill="currentColor" d="M690.8 823.4L430.0 628.7L148.5 810.9L261.7 501.9L0.0 306.1L336.7 305.6L457.8 0.0L657.5 688.5Z"/></svg>
-          <span>Product photo coming soon</span>
-        </div>
-      </div>
-      <div class="stock-dialog__body">
-        <p class="eyebrow">In-store catalog</p>
-        <h2 id="product-title" data-product-title></h2>
-        <p class="stock-dialog__description" data-product-description hidden></p>
-        <label for="product-options">Available options in this snapshot</label>
-        <select id="product-options" data-product-options></select>
-        <dl class="stock-dialog__options" data-product-option-details></dl>
-        <p class="stock-dialog__price" data-product-price aria-live="polite"></p>
-        <p class="stock-dialog__availability" data-product-availability></p>
-        <a class="btn btn--gold" href="tel:+17185051038">Call the Store</a>
-        <p class="stock-dialog__availability">Online ordering is coming soon.</p>
-      </div>
-    </div>
-  </dialog>
-
-  <details class="wrap checkout-preview">
-    <summary>Preview the sandbox checkout · test product only</summary>
-  <!-- ═══════════════════════════════════ square sandbox test ═══════ -->
-  <!-- One product, fetched live from our AWS endpoint, with a real Square
-       sandbox checkout behind the button. js/test-checkout.js draws it and
-       css/test-checkout.css styles it. Delete this section to remove it. -->
-  <section class="section section--tight sqt-section" id="test-checkout" aria-labelledby="sqt-title">
-    <div class="wrap">
-      <div class="section-head" data-reveal>
-        <div class="section-head__text">
-          <p class="eyebrow">Online checkout, in testing</p>
-          <h2 id="sqt-title">Ship it or pick it up</h2>
-          <p class="lede" style="margin-top:18px">Choose shipping or store pickup to preview Square checkout. This is a sandbox test: no real card is charged, nothing ships and no pickup is booked.</p>
-        </div>
-      </div>
-
-      <div class="sqt is-loading"
-           data-square-test
-           data-api="https://n9ecaydkv4.execute-api.us-east-1.amazonaws.com/default"
-           data-item="E5LVW7ULD463KVCQKLV7SN63"
-           data-variation="T2APLGR5UFWGFELNUHGVNVI2"
-           data-image="assets/img/products/test-sneaker.svg"
-           data-image-alt="Illustration of a low-top sneaker, standing in for a product photograph">
-        <div class="sqt__body">
-          <p class="sqt__flag">Sandbox — checkout preview</p>
-          <p class="sqt__status">Loading the test product from Square…</p>
-        </div>
-      </div>
-
-      <noscript>
-        <p class="sqt__status" style="margin-top:16px">The test checkout needs JavaScript switched on.</p>
-      </noscript>
-    </div>
-  </section>
-
-  </details>
 
   <!-- ══════════════════════════════════════════ ask in store ════════ -->
   <section class="section section--tight ask" aria-labelledby="ask-title">
@@ -358,11 +303,10 @@
   </div>
 </footer>
 
-<script src="js/products.js"></script>
-<script src="js/stock-products.js"></script>
-<script src="js/stock-catalog.js"></script>
-<script src="js/catalog.js"></script>
-<script src="js/test-checkout.js"></script>
+<script src="js/store-api.js"></script>
+<script src="js/cart.js"></script>
+<script src="js/picker.js"></script>
+<script src="js/store.js"></script>
 <script src="js/main.js"></script>
 </body>
 </html>
