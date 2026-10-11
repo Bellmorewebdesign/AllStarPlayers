@@ -101,7 +101,7 @@
      the shop rather than a listing. */
   ASP.createCard = function (p) {
     var isFloor = !!(p.floor || p.preview);
-    var card = h('article', 'card' + (isFloor ? ' card--floor' : '') + (p.soldOut ? ' is-soldout' : ''));
+    var card = h('article', 'card' + (isFloor ? ' card--floor' : '') + (p.stockSnapshot ? ' card--stock' : '') + (p.soldOut ? ' is-soldout' : ''));
     card.setAttribute('data-item-id', p.id || '');
 
     /* ---- photo ---- */
@@ -137,7 +137,8 @@
       }
     } else {
       media.appendChild(h('div', 'card__placeholder',
-        '<svg viewBox="0 0 690.8 823.4" aria-hidden="true" focusable="false"><path fill="currentColor" d="' + STAR + '"/></svg>'));
+        '<svg viewBox="0 0 690.8 823.4" aria-hidden="true" focusable="false"><path fill="currentColor" d="' + STAR + '"/></svg>' +
+        (p.stockSnapshot ? '<span>Photo coming soon</span>' : '')));
     }
     if (p.soldOut) media.appendChild(h('div', 'card__soldout', '<span>Sold Out</span>'));
     card.appendChild(media);
@@ -149,11 +150,17 @@
        rather than picking one and looking wrong under the other filter. */
     var top = isFloor
       ? slugsOf(p).map(categoryName).filter(Boolean).join(' · ')
-      : p.brand;
+      : p.brand || (p.stockSnapshot ? slugsOf(p).map(categoryName).filter(Boolean).join(' · ') : '');
     if (top) body.appendChild(h('p', 'card__brand', esc(top)));
 
     var name = h('h3', 'card__name');
-    if (!isFloor && p.url) {
+    if (p.stockSnapshot) {
+      var details = h('button', 'card__details', esc(p.name));
+      details.type = 'button';
+      details.setAttribute('aria-haspopup', 'dialog');
+      details.addEventListener('click', function () { ASP.openStockProduct(p, details); });
+      name.appendChild(details);
+    } else if (!isFloor && p.url) {
       name.innerHTML = '<a href="' + esc(p.url) + '">' + esc(p.name) + '</a>';
     } else {
       name.textContent = p.name || '';
@@ -178,6 +185,8 @@
     var foot = h('div', 'card__foot');
     if (isFloor) {
       foot.appendChild(h('p', 'card__tag', 'In store'));
+    } else if (p.stockSnapshot) {
+      foot.appendChild(h('p', 'card__price', esc(ASP.stockPrice(p))));
     } else if (p.price == null) {
       foot.appendChild(h('p', 'card__price card__price--tbd', 'Ask in store'));
     } else if (p.originalPrice && p.originalPrice > p.price) {
@@ -193,6 +202,9 @@
       foot.appendChild(sizes);
     }
     body.appendChild(foot);
+    if (p.stockSnapshot) {
+      body.appendChild(h('p', 'card__options', p.variants.length + ' available ' + (p.variants.length === 1 ? 'option' : 'options') + ' · View details'));
+    }
     card.appendChild(body);
     return card;
   };
@@ -211,6 +223,9 @@
       slugsOf(p).map(categoryName).join(' '),
       (p.sizes || []).join(' '),
       (p.colors || []).map(function (c) { return c.name; }).join(' ')]
+      .concat((p.variants || []).map(function (v) {
+        return v.name + ' ' + (v.options || []).map(function (o) { return o.value; }).join(' ');
+      }))
       .join(' ').toLowerCase();
     return q.toLowerCase().split(/\s+/).every(function (t) { return hay.indexOf(t) > -1; });
   }
@@ -288,6 +303,10 @@
     var noResults = document.querySelector('[data-no-results]');
     var floorFlag = document.querySelector('[data-floor-note]');
     var filterBtn = document.querySelector('[data-filter-open]');
+    var moreBtn = document.querySelector('[data-load-more]');
+    var pageSize = moreBtn ? 36 : ITEMS.length;
+    var visibleLimit = pageSize;
+    var currentList = [];
 
     /* Drop the sort options that cannot do anything yet. A control that looks
        live but changes nothing is worse than no control. */
@@ -362,6 +381,14 @@
       });
     });
     if (form) form.addEventListener('submit', function (e) { e.preventDefault(); });
+    if (moreBtn) moreBtn.addEventListener('click', function () {
+      var firstNew = visibleLimit;
+      visibleLimit += pageSize;
+      commit(currentList);
+      var next = grid.children[firstNew];
+      var details = next && next.querySelector('.card__details');
+      if (details) details.focus({ preventScroll: true });
+    });
 
     /* --- the filter drawer on phones --- */
     var drawer = document.querySelector('[data-drawer]');
@@ -398,8 +425,10 @@
     /* --- draw --- */
     function render(animate) {
       var list = ASP.query(state);
+      currentList = list;
+      visibleLimit = pageSize;
 
-      if (animate && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      if (!moreBtn && animate && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
         grid.classList.add('is-swapping');
         window.setTimeout(function () { commit(list); }, 170);
       } else {
@@ -430,12 +459,6 @@
       if (filterBtn) filterBtn.classList.toggle('has-active', state.category !== 'all');
       if (searchClear) searchClear.classList.toggle('is-visible', !!state.q);
 
-      if (countEl) {
-        var noun = ASP.hasRealProducts() ? 'products' : 'photos';
-        countEl.innerHTML = list.length
-          ? 'Showing <b>' + list.length + '</b> of ' + ITEMS.length + ' ' + noun
-          : 'Nothing matches';
-      }
       if (noResults) noResults.hidden = list.length > 0;
       if (floorFlag) floorFlag.hidden = !list.some(function (p) { return p.floor || p.preview; });
 
@@ -443,8 +466,19 @@
     }
 
     function commit(list) {
-      paint(grid, list);
+      paint(grid, list.slice(0, visibleLimit));
       grid.classList.remove('is-swapping');
+      var shown = Math.min(visibleLimit, list.length);
+      if (countEl) {
+        var noun = ASP.hasRealProducts() ? 'products' : 'photos';
+        countEl.innerHTML = list.length
+          ? 'Showing <b>' + shown + '</b> of ' + list.length + ' ' + noun
+          : 'Nothing matches';
+      }
+      if (moreBtn) {
+        moreBtn.hidden = shown >= list.length;
+        moreBtn.textContent = 'Show ' + Math.min(pageSize, list.length - shown) + ' more products';
+      }
     }
 
     function pill(label, onRemove) {
