@@ -188,6 +188,7 @@
         fulfillment = value;
         btn.textContent = value === 'shipping' ? 'Preview Shipping Checkout' : 'Preview Pickup Checkout';
         detail.textContent = fulfillmentDetail(value);
+        pickupNotice.hidden = value !== 'pickup';
         err.hidden = true;
         err.textContent = '';
         status.textContent = '';
@@ -201,8 +202,25 @@
     detail.setAttribute('aria-live', 'polite');
     body.appendChild(detail);
 
+    var pickupNotice = el('aside', 'sqt__pickup-notice');
+    pickupNotice.hidden = true;
+    pickupNotice.setAttribute('aria-labelledby', 'sqt-pickup-notice-title');
+    var pickupTitle = el('strong', null, 'Store pickup — this order will not be shipped');
+    pickupTitle.id = 'sqt-pickup-notice-title';
+    pickupNotice.appendChild(pickupTitle);
+    pickupNotice.appendChild(el('p', null,
+      'Wait for the store to contact you before visiting, then collect during store hours. ' +
+      'Your payment receipt does not mean your order is ready for pickup.'));
+    pickupNotice.appendChild(el('p', null,
+      'On the next page, enter an email address and phone number the store can use to reach you. ' +
+      'Square’s payment page may not repeat these pickup instructions.'));
+    pickupNotice.appendChild(el('p', 'sqt__pickup-preview',
+      'Sandbox preview only: no payment is taken, no pickup is booked and no notification is sent.'));
+    body.appendChild(pickupNotice);
+
     var btn = el('button', 'btn btn--gold sqt__buy', 'Preview Shipping Checkout');
     btn.type = 'button';
+    btn.setAttribute('aria-describedby', 'sqt-fulfillment-detail');
     body.appendChild(btn);
 
     var status = el('p', 'sqt__status sqt__status--live');
@@ -225,7 +243,7 @@
 
   function fulfillmentDetail(fulfillment) {
     return fulfillment === 'pickup'
-      ? 'We’ll notify you when your order is ready. Collect during store hours. Please wait for your ready-for-pickup message before visiting. Sandbox preview: no pickup messages are sent.'
+      ? 'Store pickup selected. Please read the pickup instructions below before continuing to Square.'
       : 'Delivery by mail or carrier. Shipping charges and delivery estimates are not yet set.';
   }
 
