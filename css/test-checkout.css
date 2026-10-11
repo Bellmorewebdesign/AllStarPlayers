@@ -97,6 +97,11 @@
 }
 
 .sqt__fine{color:var(--bone-3);font-size:.7rem;line-height:1.7;max-width:56ch}
+.sqt__pickup-notice{width:100%;box-sizing:border-box;padding:18px 20px;border:1px solid var(--gold);border-left:3px solid var(--gold);background:rgba(207,163,64,.09);color:var(--bone);font-size:.85rem;line-height:1.65}
+.sqt__pickup-notice[hidden]{display:none}
+.sqt__pickup-notice strong{display:block;font-size:.95rem;line-height:1.4}
+.sqt__pickup-notice p{margin:10px 0 0}
+.sqt__pickup-notice .sqt__pickup-preview{font-size:.75rem;color:var(--bone-3)}
 
 /* the thin gold sweep under the loading line */
 .sqt__bar{
