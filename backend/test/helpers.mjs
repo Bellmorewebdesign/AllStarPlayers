@@ -20,6 +20,13 @@ export function fakeDynamo({ delay = false, failOnce = null, rows: seed } = {}) 
     if (!expr) return true;
     if (expr === 'attribute_not_exists(pk)') return existing === undefined;
     if (expr === 'attribute_exists(pk)') return existing !== undefined;
+    /* The catalog refresh lease: free, or whoever had it has run out of time. */
+    const lease = expr.match(/^attribute_not_exists\(pk\) OR (\w+) < :(\w+)$/);
+    if (lease) {
+      if (existing === undefined) return true;
+      const values = unmarshall(input.ExpressionAttributeValues || {});
+      return Number(existing[lease[1]] ?? 0) < Number(values[':' + lease[2]]);
+    }
     /* The optimistic-concurrency check the hold rows use. */
     const version = expr.match(/^#?(\w+) = :(\w+)$/);
     if (version) {
@@ -49,7 +56,13 @@ export function fakeDynamo({ delay = false, failOnce = null, rows: seed } = {}) 
       const trigger = failures[name];
       if (trigger !== undefined) {
         const k = input.Key ? unmarshall(input.Key) : (input.Item ? unmarshall(input.Item) : {});
-        if (trigger === true || String(k.pk || '').startsWith(trigger)) {
+        const matches = trigger === true
+          ? true
+          : typeof trigger === 'string'
+            ? String(k.pk || '').startsWith(trigger)
+            : String(k.pk || '').startsWith(trigger.pk || '') &&
+              (trigger.sk === undefined || k.sk === trigger.sk);
+        if (matches) {
           delete failures[name];
           const err = new Error('simulated DynamoDB failure on ' + name);
           err.name = 'ProvisionedThroughputExceededException';
@@ -73,7 +86,9 @@ export function fakeDynamo({ delay = false, failOnce = null, rows: seed } = {}) 
 
       if (name === 'DeleteItemCommand') {
         const { pk, sk } = unmarshall(input.Key);
-        rows.delete(key(pk, sk));
+        const k = key(pk, sk);
+        if (!conditionHolds(input.ConditionExpression, rows.get(k), input)) throw fail();
+        rows.delete(k);
         return {};
       }
 
@@ -411,3 +426,15 @@ export const secretsFake = (overrides = {}) => ({
     })
   })
 });
+
+
+/* Browsing reads a published snapshot and never builds one, so a test that
+   wants a shop to browse has to run the refresh task first — exactly as the
+   EventBridge schedule does in production. */
+export async function warmCatalog(handler) {
+  const result = await handler({ task: 'refresh-catalog' });
+  if (result && result.refreshed === false && result.reason === 'failed') {
+    throw new Error('refresh-catalog failed while warming a test: ' + result.error);
+  }
+  return result;
+}

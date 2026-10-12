@@ -143,8 +143,23 @@ aws lambda create-function \
   --region us-east-1
 ```
 
-**Timeout 25 seconds, not the 3-second default.** A cold catalog fetch walks
-several pages of Square's catalog and several inventory batches.
+**Timeout 300 seconds, not the 3-second default and not 25.** Production has
+844 products and 5,869 variations; paging all of that out of Square and
+batching the inventory took longer than 25 seconds, which is what broke the
+first attempt. Nothing over HTTP waits for it any more (§2a), so the function
+can be given real time:
+
+```bash
+aws lambda update-function-configuration \
+  --function-name all-star-players-store-production \
+  --timeout 300 --memory-size 1024 --region us-east-1
+```
+
+More memory is not for the memory; it buys proportionally more CPU, which is
+most of what gzipping a three-megabyte catalog costs. Keep
+`REFRESH_LEASE_SECONDS` (600) comfortably above this timeout, or a slow
+refresh could lose its lease while still running and a second one start on
+top of it.
 
 Then the configuration. This is the part you will come back and edit:
 
@@ -191,7 +206,9 @@ Commas inside the JSON need escaping on the CLI; the console is easier for
 | `SHIPPING_ENABLED` / `SHIPPING_RATES` | off | shipping is offered only with a valid rates array |
 | `SELL_UNTRACKED_VARIATIONS` | `false` | whether items Square is not counting can be bought |
 | `STOCK_HOLDS_ENABLED` / `STOCK_HOLD_SECONDS` | on / 900 | the soft hold, see §9 |
-| `CATALOG_TTL_SECONDS` | 600 | how stale browsing may be; checkout always revalidates |
+| `CATALOG_TTL_SECONDS` | 900 | how old a snapshot may be before the storefront calls it stale. It is still served either way |
+| `REFRESH_LEASE_SECONDS` | 600 | the refresh lease. **Must exceed the Lambda timeout** |
+| `CATALOG_WARM_RETRY_SECONDS` | 15 | what a browsing request is told to wait while the first snapshot builds |
 | `APPLY_CATALOG_TAXES` | `true` | attach the shop's own Square tax rules to the order |
 | `SQUARE_ASK_FOR_SHIPPING_ADDRESS` | `false` | see §7 |
 | `INFLIGHT_RECOVERY_MS` | 15000 | how long a half-finished checkout or webhook is left alone before another request takes it over |
@@ -201,6 +218,110 @@ Commas inside the JSON need escaping on the CLI; the console is easier for
 | `CLEANUP_FORCE_CANCEL_ORDER` | `false` | fallback that cancels the order directly if deleting the link does not — **unverified, see §9b** |
 | `ORDER_RETENTION_DAYS` | 90 | how long order rows live |
 | `MAX_CART_LINES` / `MAX_LINE_QUANTITY` | 40 / 20 | ceilings |
+
+## 5a. The catalog refresh: a scheduled job, never a request
+
+**Browsing never builds the catalog.** This is the fix for the production
+timeout, and it is worth stating as a rule because it is easy to undo by
+accident: `GET /catalog` and `POST /cart/validate` read a snapshot that was
+published earlier. They make no Square calls at all. If there is no snapshot
+they answer **503 `CATALOG_WARMING`** with a `retryAfterSeconds`, and the
+storefront shows a "getting the shop ready" state and retries by itself.
+
+The rebuild runs as a scheduled background invocation with the whole Lambda
+timeout to itself:
+
+1. Take a lease, so two refreshes never run at once.
+2. Write the new build into **its own DynamoDB partition**. Nothing points at
+   it, so a crash here is invisible to shoppers.
+3. Flip a single pointer row. Before that write the old catalog is live;
+   after it, the new one is. There is no in-between.
+4. Delete the builds nothing points at any more.
+
+A refresh that fails at any step leaves the previous complete snapshot
+serving, and records the error for `GET /admin/catalog`.
+
+### Wiring the schedule
+
+```bash
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+FN=all-star-players-store-production
+REGION=us-east-1
+
+aws events put-rule --name "${FN}-catalog-refresh" --region $REGION \
+  --schedule-expression "rate(15 minutes)" --state ENABLED
+
+aws lambda add-permission --function-name "$FN" --region $REGION \
+  --statement-id events-catalog-refresh --action lambda:InvokeFunction \
+  --principal events.amazonaws.com \
+  --source-arn "arn:aws:events:${REGION}:${ACCOUNT_ID}:rule/${FN}-catalog-refresh"
+
+aws events put-targets --rule "${FN}-catalog-refresh" --region $REGION \
+  --targets "Id=1,Arn=arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:${FN},Input='{\"task\":\"refresh-catalog\"}'"
+```
+
+Repeat with `sandbox` in place of `production`.
+
+Pick the interval against how often the shop's stock moves. Every 15 minutes
+costs ~2,900 runs a month and keeps the website within a quarter of an hour of
+Square. Going below 5 minutes is not useful: the lease will start skipping
+runs that collide with one still going.
+
+### Letting the function kick off its own refresh
+
+`POST /catalog/refresh` no longer rebuilds inline — it would be cut off by API
+Gateway long before finishing. It asks this same function to do it in the
+background and answers `202` at once. That needs permission to invoke itself:
+
+```bash
+aws iam put-role-policy --role-name "${FN}-role" \
+  --policy-name invoke-self --policy-document "{
+    \"Version\": \"2012-10-17\",
+    \"Statement\": [{
+      \"Effect\": \"Allow\",
+      \"Action\": \"lambda:InvokeFunction\",
+      \"Resource\": \"arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:${FN}\"
+    }]
+  }"
+```
+
+Skip this if you would rather refresh only from the CLI; the route then
+answers 503 saying it could not start one, and everything else works.
+
+### The first build
+
+A brand new deployment has no snapshot, so the shop shows its warming state
+until the first refresh lands. Do not wait for the schedule:
+
+```bash
+aws lambda invoke --function-name "$FN" --region $REGION \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{"task":"refresh-catalog"}' /dev/stdout
+```
+
+Expect something like
+`{"refreshed":true,"buildId":"20261012T0415Z-a1b2c3","durationMs":48000,
+"counts":{"products":844,"variations":5869}}`.
+
+### Watching it
+
+```bash
+curl -s -H "x-admin-key: $ADMIN_REFRESH_KEY" \
+  https://$API.execute-api.us-east-1.amazonaws.com/default/admin/catalog | python3 -m json.tool
+```
+
+Gives the live build id, its age, the product and variation counts, and when
+the last refresh ran, how long it took and whether it failed.
+
+Log lines worth a CloudWatch metric filter before launch:
+
+| Line | Means |
+| --- | --- |
+| `catalog_refreshed` | a good run; carries duration and counts |
+| `catalog_refresh_failed` | the live catalog is now ageing. Alarm on this |
+| `catalog_refresh_skipped` | a run collided with one still going. Fine occasionally, a problem if constant |
+| `catalog_pointer_unreadable` | should be impossible; the shop is serving 503s |
+| `scheduled_task_failed` | a scheduled invocation blew up before it could report |
 
 ## 6. IAM: the narrowest policy that works
 
@@ -263,7 +384,8 @@ INT=$(aws apigatewayv2 create-integration --api-id $API --region us-east-1 \
 for ROUTE in "GET /config" "GET /catalog" "POST /catalog/refresh" \
              "POST /cart/validate" "POST /checkout" "GET /order" \
              "POST /webhooks/square" "POST /admin/sweep" \
-             "GET /admin/stuck" "POST /admin/holds/release"; do
+             "GET /admin/stuck" "POST /admin/holds/release" \
+             "GET /admin/catalog"; do
   aws apigatewayv2 create-route --api-id $API --region us-east-1 \
     --route-key "$ROUTE" --target "integrations/$INT"
 done
@@ -337,7 +459,7 @@ and it can be scoped.
 
 ## 8a. What happens at the moment of checkout
 
-Browsing is cached. **Buying is not.** `POST /checkout` ignores the cache
+Browsing reads a snapshot built in the background (§5a). **Buying does not.** `POST /checkout` ignores the cache
 entirely and asks Square, every single time, about exactly the variations in
 that cart:
 
@@ -633,7 +755,25 @@ Do all of these in sandbox before touching production.
     sweep until the job is flagged, then confirm with `GET /admin/stuck` that
     it is listed and that **the item is still unavailable on the website**.
     Freeing it on its own would be the bug.
-24. **Resolving one by hand.** From that same stuck job, run
+24. **The catalog refresh.** Run `{"task":"refresh-catalog"}` directly and
+    check the duration in the response against the Lambda timeout. On this
+    catalog it took about 50 seconds; if it ever approaches the timeout,
+    raise the timeout and the lease together.
+25. **Browsing never builds.** With a snapshot published, hit `GET /catalog`
+    a dozen times and confirm in CloudWatch that no `/v2/catalog/list` call
+    was made. Browsing must be free of Square entirely.
+26. **A cold start.** Delete the `CURRENT` pointer row from DynamoDB and load
+    the shop page: it should show "getting the shop ready" and retry itself,
+    not an error and not an empty shop. Run the refresh; the page should pick
+    it up on its own.
+27. **Two refreshes at once.** Fire the refresh task twice within a second.
+    One should report `refreshed: true`, the other
+    `reason: "already_running"` — and `GET /admin/catalog` should show one
+    build, not two.
+28. **A refresh that fails.** Put a wrong token in the secret, run the
+    refresh, and confirm the shop keeps serving the build it already had and
+    `GET /admin/catalog` shows `lastError`. Put the token back.
+29. **Resolving a stuck hold by hand.** From that same stuck job, run
     `POST /admin/holds/release` without `confirm` (it must refuse), then with
     it (the stock comes back), and check the `hold_released_by_hand` line is
     in CloudWatch.
@@ -654,5 +794,13 @@ does, and then two or three of them (§8a).
 The cleanup sweep adds one scheduled invocation every five minutes — about
 8,600 a month, which is inside the Lambda free tier and costs a few cents
 beyond it. A run with nothing to do is one DynamoDB Query and no Square calls
-at all. At this shop's volume expect the AWS bill to be cents a month;
+at all.
+
+The catalog refresh adds ~2,900 invocations a month at fifteen-minute
+intervals. Each is the expensive one — around a minute of Lambda at 1024MB,
+plus roughly sixty Square calls to page the catalog and batch the inventory —
+so call it a few tens of cents a month, and about 175,000 Square API calls,
+which is well inside Square's limits. Lengthen the interval if that ever
+matters. Browsing itself costs one small DynamoDB read per request and
+nothing at Square. At this shop's volume expect the AWS bill to be cents a month;
 the Secrets Manager secret (about $0.40/month each) is the largest fixed line.

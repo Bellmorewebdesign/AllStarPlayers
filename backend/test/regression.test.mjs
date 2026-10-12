@@ -13,7 +13,7 @@ import { createHmac } from 'node:crypto';
 import {
   fakeDynamo, fakeSquareFetch, squareHandlers, LOCATION, baseEnv, secretsFake,
   catalogFixture, inventoryResponse, INVENTORY, batchRetrieveResponse
-} from './helpers.mjs';
+, warmCatalog } from './helpers.mjs';
 
 const ORIGIN = 'https://bellmorewebdesign.github.io';
 const NOTIFICATION_URL = 'https://n9ecaydkv4.execute-api.us-east-1.amazonaws.com/default/webhooks/square';
@@ -39,7 +39,7 @@ function stockTable(initial = {}) {
   };
 }
 
-async function bootstrap({ env = {}, handlers, ddb: shared, secrets } = {}) {
+async function bootstrap({ env = {}, handlers, ddb: shared, secrets, seed = true } = {}) {
   for (const [k, v] of Object.entries({ ...baseEnv(), WEBHOOK_NOTIFICATION_URL: NOTIFICATION_URL, ...env })) {
     if (v === null) delete process.env[k]; else process.env[k] = v;
   }
@@ -59,6 +59,8 @@ async function bootstrap({ env = {}, handlers, ddb: shared, secrets } = {}) {
     storeMod: { ...store, createStore: (o) => store.createStore({ ...o, client: ddb.client }) },
     stamp
   });
+  if (seed) await warmCatalog(handler);
+  if (seed) await warmCatalog(handler);
   return { handler, ddb, calls: fetchImpl.calls };
 }
 
@@ -187,12 +189,11 @@ test('checkout fails safely when Square cannot confirm availability', async () =
   assert.equal(calls.filter(c => c.path.includes('payment-links')).length, 0);
 });
 
-test('a stale browsing cache is never used to authorise a purchase', async () => {
+test('a stale browsing snapshot is never used to authorise a purchase', async () => {
   const stock = stockTable();
   const link = stickyLink();
   let catalogDown = false;
   const { handler, calls } = await bootstrap({
-    env: { CATALOG_TTL_SECONDS: '0' },
     handlers: stock.handlers({
       'POST /v2/online-checkout/payment-links': link,
       'GET /v2/catalog/list': () => catalogDown
@@ -201,13 +202,17 @@ test('a stale browsing cache is never used to authorise a purchase', async () =>
     })
   });
 
-  await handler(ev('GET', '/catalog'));
+  /* Browsing is served from the published snapshot and keeps working even
+     when Square is unreachable and refreshes are failing. */
   catalogDown = true;
-  const stale = await handler(ev('GET', '/catalog'));
-  assert.equal(J(stale).stale, true, 'browsing is allowed to be stale');
+  const failed = await handler({ task: 'refresh-catalog' });
+  assert.equal(failed.refreshed, false);
+  const browse = await handler(ev('GET', '/catalog'));
+  assert.equal(browse.statusCode, 200, 'the shop stays up');
 
-  /* Buying is not. The per-variation verification path is separate from the
-     list endpoint, so this must still work — but it must be a live read. */
+  /* Buying does not get the same latitude. The per-variation verification is
+     a live read, so a unit that has sold cannot be bought off an old page. */
+  catalogDown = false;
   stock.set('VAR_TEE_S', 0);
   const r = await handler(ev('POST', '/checkout', {
     body: { attemptId: 'attempt-stalecache', lines: [{ variationId: 'VAR_TEE_S', quantity: 1 }], fulfillment: PICKUP }

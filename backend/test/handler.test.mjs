@@ -9,14 +9,14 @@ import { createHmac } from 'node:crypto';
 
 import {
   fakeDynamo, fakeSquareFetch, squareHandlers, LOCATION, baseEnv, secretsFake, catalogFixture, inventoryResponse
-} from './helpers.mjs';
+, warmCatalog } from './helpers.mjs';
 
 const ORIGIN = 'https://bellmorewebdesign.github.io';
 const NOTIFICATION_URL = 'https://n9ecaydkv4.execute-api.us-east-1.amazonaws.com/default/webhooks/square';
 
 /* The handler builds its own clients, so the modules it imports are patched
    before it is loaded. Each test gets a fresh module graph. */
-async function bootstrap({ env = {}, squareOverrides = {}, secrets, ddb: sharedDdb } = {}) {
+async function bootstrap({ env = {}, squareOverrides = {}, secrets, ddb: sharedDdb, seed = true } = {}) {
   for (const [k, v] of Object.entries({ ...baseEnv(), WEBHOOK_NOTIFICATION_URL: NOTIFICATION_URL, ...env })) {
     if (v === null) delete process.env[k]; else process.env[k] = v;
   }
@@ -43,6 +43,8 @@ async function bootstrap({ env = {}, squareOverrides = {}, secrets, ddb: sharedD
 
   const { makeHandler } = await import('./harness.mjs' + stamp);
   const handler = await makeHandler({ configMod, squareMod, storeMod, stamp });
+  if (seed) await warmCatalog(handler);
+  if (seed) await warmCatalog(handler);
   return { handler, ddb, fetchImpl, calls: fetchImpl.calls };
 }
 
@@ -102,24 +104,30 @@ test('a warm catalog is not refetched from Square on every request', async () =>
   assert.equal(calls.filter(c => c.path === '/v2/catalog/list').length, after, 'served from cache');
 });
 
-test('a Square outage serves the cached catalog rather than an empty shop', async () => {
-  let fail = false;
+test('a failed refresh leaves the last good catalog serving', async () => {
+  let broken = false;
   const { handler } = await bootstrap({
     squareOverrides: {
-      'GET /v2/catalog/list': () => fail
+      'GET /v2/catalog/list': () => broken
         ? { status: 503, json: { errors: [{ code: 'SERVICE_UNAVAILABLE' }] } }
         : { json: catalogFixture() }
-    },
-    env: { CATALOG_TTL_SECONDS: '0' }       /* force a refetch every time */
+    }
   });
   const warm = await handler(ev('GET', '/catalog'));
   assert.equal(J(warm).total, 2);
+  const buildId = J(warm).buildId;
 
-  fail = true;
-  const cold = await handler(ev('GET', '/catalog'));
-  assert.equal(cold.statusCode, 200);
-  assert.equal(J(cold).stale, true, 'honestly labelled as stale');
-  assert.equal(J(cold).total, 2);
+  /* Square falls over and the scheduled refresh fails. */
+  broken = true;
+  const result = await handler({ task: 'refresh-catalog' });
+  assert.equal(result.refreshed, false);
+  assert.equal(result.reason, 'failed');
+
+  /* The shop carries on, on exactly the build it had. */
+  const after = await handler(ev('GET', '/catalog'));
+  assert.equal(after.statusCode, 200);
+  assert.equal(J(after).total, 2);
+  assert.equal(J(after).buildId, buildId, 'the pointer never moved');
 });
 
 test('GET /config says what is actually configured, and leaks nothing', async () => {
@@ -566,13 +574,30 @@ test('CORS answers the website origin and nobody else', async () => {
   assert.equal(other.headers['Access-Control-Allow-Origin'], undefined);
 });
 
-test('the refresh route needs the admin key', async () => {
+test('the refresh route needs the admin key, and only asks for a refresh', async () => {
   const { handler } = await bootstrap();
   assert.equal((await handler(ev('POST', '/catalog/refresh'))).statusCode, 403);
   assert.equal((await handler(ev('POST', '/catalog/refresh', { headers: { 'x-admin-key': 'wrong' } }))).statusCode, 403);
-  const ok = await handler(ev('POST', '/catalog/refresh', { headers: { 'x-admin-key': 'admin-test-key' } }));
-  assert.equal(ok.statusCode, 200);
-  assert.equal(J(ok).counts.products, 2);
+
+  /* Not running in Lambda, so there is nothing to invoke — but it must answer
+     straight away either way rather than rebuilding inline and timing out. */
+  const r = await handler(ev('POST', '/catalog/refresh', { headers: { 'x-admin-key': 'admin-test-key' } }));
+  assert.ok([202, 503].includes(r.statusCode), r.body);
+  assert.ok(typeof J(r).message === 'string');
+});
+
+test('the catalog status route reports what is live and when it was built', async () => {
+  const { handler } = await bootstrap();
+  assert.equal((await handler(ev('GET', '/admin/catalog'))).statusCode, 403);
+
+  const r = await handler(ev('GET', '/admin/catalog', { headers: { 'x-admin-key': 'admin-test-key' } }));
+  assert.equal(r.statusCode, 200);
+  const b = J(r);
+  assert.ok(b.live.buildId);
+  assert.equal(b.live.counts.products, 2);
+  assert.ok(b.live.ageSeconds >= 0);
+  assert.ok(b.lastRefresh.lastSuccessAt > 0);
+  assert.equal(b.lastRefresh.lastError, null);
 });
 
 test('a production token is accepted whatever it happens to start with', async () => {

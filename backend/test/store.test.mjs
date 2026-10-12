@@ -5,49 +5,129 @@ import { fakeDynamo } from './helpers.mjs';
 
 const mk = () => { const d = fakeDynamo(); return { d, store: createStore({ tableName: 't', client: d.client }) }; };
 
-test('the catalog survives a round trip through gzipped chunks', async () => {
-  const { store } = mk();
-  const snapshot = {
-    products: Array.from({ length: 900 }, (_, i) => ({
-      id: 'ITEM' + i, name: 'Product ' + i, description: 'x'.repeat(200),
-      variations: [{ id: 'V' + i, price: { amount: 1000 + i, currency: 'USD' } }]
-    })),
-    categories: [{ id: 'C', name: 'Tees' }], taxes: [], fetchedAt: '2026-10-11T00:00:00Z',
-    counts: { products: 900 }
-  };
-  const written = await store.writeCatalog('production', snapshot, 600);
-  assert.ok(written.chunkCount >= 1);
+const bigSnapshot = (n = 900) => ({
+  products: Array.from({ length: n }, (_, i) => ({
+    id: 'ITEM' + i, name: 'Product ' + i, description: 'x'.repeat(200),
+    variations: [{ id: 'V' + i, price: { amount: 1000 + i, currency: 'USD' } }]
+  })),
+  categories: [{ id: 'C', name: 'Tees' }], taxes: [],
+  fetchedAt: '2026-10-12T00:00:00Z', counts: { products: n }
+});
 
-  const read = await store.readCatalog('production');
-  assert.deepEqual(read.snapshot.products.length, 900);
+const publish = async (store, env, snapshot) => {
+  const buildId = store.newBuildId();
+  await store.noteCatalogBuild(env, buildId);
+  const written = await store.writeCatalogBuild(env, buildId, snapshot);
+  await store.publishCatalogBuild(env, {
+    buildId, chunkCount: written.chunkCount, bytes: written.bytes,
+    fetchedAt: snapshot.fetchedAt, counts: snapshot.counts
+  });
+  await store.pruneCatalogBuilds(env, buildId);
+  return { buildId, written };
+};
+
+test('a published catalog survives a round trip through gzipped chunks', async () => {
+  const { store } = mk();
+  const snapshot = bigSnapshot(900);
+  const { buildId } = await publish(store, 'production', snapshot);
+
+  const read = await store.readCatalogSnapshot('production');
+  assert.equal(read.buildId, buildId);
+  assert.equal(read.snapshot.products.length, 900);
   assert.equal(read.snapshot.products[899].name, 'Product 899');
   assert.equal(read.snapshot.products[500].variations[0].price.amount, 1500);
 });
 
-test('an expired cache reads as missing, but is still there as stale', async () => {
+test('a half-written build is invisible: the old catalog keeps serving', async () => {
   const { d, store } = mk();
-  await store.writeCatalog('production', { products: [{ id: 'A' }], fetchedAt: 'then', counts: {} }, 600);
-  const manifest = d.find('CATALOG#production').find(r => r.sk === 'MANIFEST');
-  manifest.expiresAt = Math.floor(Date.now() / 1000) - 10;
+  const first = await publish(store, 'production', bigSnapshot(50));
 
-  assert.equal(await store.readCatalog('production'), null, 'too old to serve as fresh');
-  const stale = await store.readCatalogStale('production');
-  assert.equal(stale.stale, true);
-  assert.equal(stale.snapshot.products[0].id, 'A');
+  /* A refresh starts, writes some of its chunks, and the container dies. */
+  const buildId = store.newBuildId();
+  await store.noteCatalogBuild('production', buildId);
+  await store.writeCatalogBuild('production', buildId, noisySnapshot(4000));
+  /* publishCatalogBuild is never reached. */
+
+  const read = await store.readCatalogSnapshot('production');
+  assert.equal(read.buildId, first.buildId, 'still the complete one');
+  assert.equal(read.snapshot.products.length, 50);
+  assert.equal(read.unreadable, false);
+
+  /* And the next successful refresh sweeps the orphan away. */
+  const third = await publish(store, 'production', bigSnapshot(60));
+  assert.equal(d.find('CATALOG#production#B' + buildId).length, 0, 'the abandoned build is gone');
+  assert.equal((await store.readCatalogSnapshot('production')).buildId, third.buildId);
 });
 
-test('a half-written cache is never stitched together', async () => {
+test('a build with fewer chunks than its predecessor is still readable', async () => {
+  /* The old design wrote every build to the same keys, so shrinking left
+     orphan chunks behind and the count never matched again. */
+  const { store } = mk();
+  await publish(store, 'production', noisySnapshot(4000));
+  const small = await publish(store, 'production', bigSnapshot(5));
+  const read = await store.readCatalogSnapshot('production');
+  assert.equal(read.buildId, small.buildId);
+  assert.equal(read.snapshot.products.length, 5);
+});
+
+/* Random text, because gzip squeezes repeated filler into a single chunk. */
+const noisySnapshot = (n) => ({
+  products: Array.from({ length: n }, (_, i) => ({
+    id: 'I' + i, blob: Array.from({ length: 8 }, () => Math.random().toString(36).slice(2)).join('')
+  })),
+  categories: [], taxes: [], fetchedAt: 'now', counts: { products: n }
+});
+
+test('a pointer to chunks that will not read back is reported, not guessed at', async () => {
   const { d, store } = mk();
-  /* Random text so gzip cannot squeeze it into a single chunk. */
-  const noise = n => Array.from({ length: n }, () => Math.random().toString(36).slice(2)).join('');
-  await store.writeCatalog('production', {
-    products: Array.from({ length: 4000 }, (_, i) => ({ id: 'I' + i, blob: noise(40) })),
-    fetchedAt: 'now', counts: {}
-  }, 600);
-  const chunks = d.find('CATALOG#production').filter(r => String(r.sk).startsWith('CHUNK#'));
-  assert.ok(chunks.length > 1, 'this snapshot really did need more than one chunk');
+  const { buildId } = await publish(store, 'production', noisySnapshot(4000));
+  const chunks = d.find('CATALOG#production#B' + buildId);
+  assert.ok(chunks.length > 1, 'this snapshot needed more than one chunk');
   d.rows.delete(chunks[0].pk + '\u0000' + chunks[0].sk);
-  assert.equal(await store.readCatalog('production'), null);
+
+  const read = await store.readCatalogSnapshot('production');
+  assert.equal(read.unreadable, true);
+  assert.equal(read.snapshot, null);
+});
+
+test('no catalog at all reads as nothing, not as an empty shop', async () => {
+  const { store } = mk();
+  assert.equal(await store.readCatalogSnapshot('production'), null);
+  assert.equal(await store.readCatalogPointer('production'), undefined ?? null);
+});
+
+test('the refresh lease admits one holder and expires on its own', async () => {
+  const { d, store } = mk();
+  assert.equal((await store.acquireCatalogLock('production', { holder: 'a', leaseSeconds: 600 })).acquired, true);
+
+  const second = await store.acquireCatalogLock('production', { holder: 'b', leaseSeconds: 600 });
+  assert.equal(second.acquired, false);
+  assert.equal(second.heldBy, 'a');
+
+  /* A container killed mid-refresh must not wedge the schedule forever. */
+  d.find('CATALOG#production').find(r => r.sk === 'LOCK').leaseUntil = Math.floor(Date.now() / 1000) - 1;
+  assert.equal((await store.acquireCatalogLock('production', { holder: 'c' })).acquired, true);
+});
+
+test('releasing somebody else\'s lease does nothing', async () => {
+  const { store } = mk();
+  await store.acquireCatalogLock('production', { holder: 'a', leaseSeconds: 600 });
+  await store.releaseCatalogLock('production', 'someone-else');
+  assert.equal((await store.acquireCatalogLock('production', { holder: 'b' })).acquired, false,
+    'a stray release must not hand the lease to the next caller');
+  await store.releaseCatalogLock('production', 'a');
+  assert.equal((await store.acquireCatalogLock('production', { holder: 'b' })).acquired, true);
+});
+
+test('sandbox and production keep entirely separate catalogs', async () => {
+  const { store } = mk();
+  await publish(store, 'production', bigSnapshot(10));
+  await publish(store, 'sandbox', bigSnapshot(3));
+  assert.equal((await store.readCatalogSnapshot('production')).snapshot.products.length, 10);
+  assert.equal((await store.readCatalogSnapshot('sandbox')).snapshot.products.length, 3);
+  assert.equal((await store.acquireCatalogLock('sandbox', { holder: 'x' })).acquired, true);
+  assert.equal((await store.acquireCatalogLock('production', { holder: 'x' })).acquired, true,
+    'the two leases are independent');
 });
 
 test('only the first claim on an idempotency key wins', async () => {
@@ -237,9 +317,13 @@ test('BatchWriteItem leftovers are driven to completion, not dropped', async () 
     })),
     fetchedAt: 'now', counts: { products: 4000 }
   };
-  await store.writeCatalog('production', snapshot, 600);
-  const read = await store.readCatalog('production');
-  assert.ok(read, 'a dropped chunk would make the snapshot unreadable');
+  const buildId = store.newBuildId();
+  const written = await store.writeCatalogBuild('production', buildId, snapshot);
+  await store.publishCatalogBuild('production', {
+    buildId, chunkCount: written.chunkCount, fetchedAt: 'now', counts: snapshot.counts
+  });
+  const read = await store.readCatalogSnapshot('production');
+  assert.ok(read && !read.unreadable, 'a dropped chunk would make the build unreadable');
   assert.equal(read.snapshot.products.length, 4000);
 });
 

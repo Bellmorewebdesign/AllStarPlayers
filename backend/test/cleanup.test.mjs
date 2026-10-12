@@ -12,7 +12,7 @@ import { createHmac } from 'node:crypto';
 
 import {
   fakeDynamo, fakeSquareFetch, squareHandlers, LOCATION, baseEnv, secretsFake, INVENTORY
-} from './helpers.mjs';
+, warmCatalog } from './helpers.mjs';
 
 const ORIGIN = 'https://bellmorewebdesign.github.io';
 const NOTIFICATION_URL = 'https://n9ecaydkv4.execute-api.us-east-1.amazonaws.com/default/webhooks/square';
@@ -91,7 +91,7 @@ function squareWorld({ stock = {}, deleteBehaviour = 'cancels' } = {}) {
   return world;
 }
 
-async function bootstrap({ env = {}, world, ddb: shared } = {}) {
+async function bootstrap({ env = {}, world, ddb: shared, seed = true } = {}) {
   for (const [k, v] of Object.entries({ ...baseEnv(), WEBHOOK_NOTIFICATION_URL: NOTIFICATION_URL, ...env })) {
     if (v === null) delete process.env[k]; else process.env[k] = v;
   }
@@ -111,6 +111,8 @@ async function bootstrap({ env = {}, world, ddb: shared } = {}) {
     storeMod: { ...store, createStore: (o) => store.createStore({ ...o, client: ddb.client }) },
     stamp
   });
+  if (seed) await warmCatalog(handler);
+  if (seed) await warmCatalog(handler);
   return { handler, ddb, calls: fetchImpl.calls };
 }
 

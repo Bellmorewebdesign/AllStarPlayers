@@ -37,6 +37,10 @@
         err.status = res.status;
         err.code = (body && body.error) || 'HTTP_' + res.status;
         err.body = body;
+        /* The server tells us how long to leave it when something is still
+           warming up, so the page does not have to guess. */
+        err.retryAfterSeconds = body && Number(body.retryAfterSeconds) > 0
+          ? Number(body.retryAfterSeconds) : null;
         throw err;
       });
     }, function (networkError) {
@@ -64,6 +68,8 @@
           meta = {
             total: data.total, categories: data.categories || [],
             fetchedAt: data.fetchedAt, stale: data.stale === true,
+            ageSeconds: typeof data.ageSeconds === 'number' ? data.ageSeconds : null,
+            buildId: data.buildId || null,
             environment: data.environment
           };
         }

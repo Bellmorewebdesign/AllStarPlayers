@@ -166,8 +166,20 @@ export function settings() {
     /* How long a cached catalog stays usable before it is refetched. Prices
        and stock are revalidated against Square at checkout regardless, so
        this only controls how stale the browsing experience can be. */
-    catalogTtlSeconds: int('CATALOG_TTL_SECONDS', 600),
+    /* How old a snapshot may be before the storefront is told it is stale.
+       It is still served either way: a shop window a few minutes behind is
+       fine, and nothing it shows is what gets charged. */
+    catalogTtlSeconds: int('CATALOG_TTL_SECONDS', 900),
     catalogPageSize: int('CATALOG_PAGE_SIZE', 120),
+
+    /* How long the refresh lease lasts. It MUST be longer than the Lambda's
+       own timeout, or a slow refresh would lose the lease while still
+       running and a second one could start on top of it. */
+    refreshLeaseSeconds: int('REFRESH_LEASE_SECONDS', 600),
+
+    /* What a browsing request is told to wait before asking again while the
+       very first snapshot is still being built. */
+    catalogWarmRetrySeconds: int('CATALOG_WARM_RETRY_SECONDS', 15),
 
     /* Square's own page sizes. Conservative on purpose; raise them only after
        checking the current documented maximums. */

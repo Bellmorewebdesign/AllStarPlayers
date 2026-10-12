@@ -61,7 +61,14 @@
       els.status.appendChild(btn);
     }
   }
-  function clearStatus() { if (els.status) els.status.hidden = true; }
+  function clearStatus() {
+    if (!els.status) return;
+    els.status.hidden = true;
+    /* Drop the state class too: a hidden element still carrying
+       --warm or --error is a lie waiting to be read. */
+    els.status.className = 'catalog-status';
+    els.status.innerHTML = '';
+  }
 
   function skeleton(n) {
     grid.innerHTML = '';
@@ -76,7 +83,41 @@
     }
   }
 
+  /* The catalog is rebuilt in the background, not during a request. Right
+     after a deploy — or if a rebuild is running for the very first time —
+     there may be no snapshot yet, and the API says so with a 503 and a
+     suggested wait. That is a "nearly ready", not a failure, so the page
+     waits and tries again by itself. */
+  var warmAttempts = 0;
+  var warmTimer = null;
+
+  function stopWarming() {
+    if (warmTimer) { clearTimeout(warmTimer); warmTimer = null; }
+  }
+
+  function showWarming(err) {
+    var wait = err.retryAfterSeconds || 15;
+    warmAttempts++;
+    grid.innerHTML = '';
+    skeleton(8);
+    if (els.count) els.count.textContent = '';
+
+    var keepTrying = warmAttempts <= 10;
+    setStatus('warm', 'Getting the shop ready',
+      err.code === 'CATALOG_UNAVAILABLE'
+        ? 'We are rebuilding the product list. This usually takes a minute or two.'
+        : 'We are loading the latest products and stock from the store. This usually takes a minute or two.' +
+          (keepTrying ? ' This page will refresh itself.' : ''),
+      keepTrying ? null : load);
+
+    if (keepTrying) {
+      stopWarming();
+      warmTimer = setTimeout(load, wait * 1000);
+    }
+  }
+
   function load() {
+    stopWarming();
     clearStatus();
     skeleton(8);
     if (els.count) els.count.textContent = 'Loading the shop…';
@@ -94,15 +135,23 @@
         els.count.textContent = 'Showing ' + state.products.length + ' of ' + progress.meta.total + ' products…';
       }
     }).then(function (result) {
+      warmAttempts = 0;
       state.products = result.products;
       state.meta = result.meta;
       render();
       if (result.meta.stale) {
-        setStatus('warn', 'Showing a saved copy',
-          'We could not reach our catalog service just now, so prices and stock may be out of date. ' +
-          'Everything is checked again before you pay.', load);
+        /* Not an error. The product list is rebuilt on a schedule, so it can
+           be a little behind; prices and stock are read from the store system
+           again before anybody pays. */
+        setStatus('warn', 'Last updated ' + describeAge(result.meta.ageSeconds),
+          'Prices and stock are checked again at checkout.', load);
       }
     }).catch(function (err) {
+      if (err.code === 'CATALOG_WARMING' || err.code === 'CATALOG_UNAVAILABLE') {
+        showWarming(err);
+        return;
+      }
+      stopWarming();
       grid.innerHTML = '';
       if (els.count) els.count.textContent = '';
       setStatus('error', 'The shop would not load', err.message, load);
@@ -110,6 +159,15 @@
   }
 
   /* ------------------------------------------------------------- filters */
+
+  function describeAge(seconds) {
+    if (!seconds && seconds !== 0) return 'recently';
+    if (seconds < 120) return 'a moment ago';
+    if (seconds < 5400) return Math.round(seconds / 60) + ' minutes ago';
+    var hours = Math.round(seconds / 3600);
+    if (hours < 36) return hours + (hours === 1 ? ' hour ago' : ' hours ago');
+    return Math.round(hours / 24) + ' days ago';
+  }
 
   function buildChips() {
     Array.prototype.forEach.call(els.chipWraps, function (wrap) {

@@ -32,59 +32,83 @@ import { randomUUID, createHash } from 'node:crypto';
 
 import { loadSecrets, settings, publicConfig, ConfigError } from './lib/config.mjs';
 import { createSquareClient, SquareError } from './lib/square.mjs';
-import { buildCatalogSnapshot, verifyVariationsLive, AvailabilityUnverifiedError } from './lib/catalog.mjs';
+import { verifyVariationsLive, AvailabilityUnverifiedError } from './lib/catalog.mjs';
 import { createStore, sha256, newToken, StoreError } from './lib/store.mjs';
 import { reconcileCart, cartFingerprint } from './lib/cart.mjs';
 import { validateFulfillment } from './lib/fulfillment.mjs';
 import { buildOrder, createPaymentLink, readOrderStatus } from './lib/checkout.mjs';
 import { sweepAbandonedCheckouts } from './lib/cleanup.mjs';
+import { refreshCatalog } from './lib/refresh.mjs';
 import { verifySignature, interpret, shouldApply, SIGNATURE_HEADER, isTerminal } from './lib/webhook.mjs';
 import {
   methodOf, routePath, rawBody, header, query, reply, parseJsonBody, corsHeaders
 } from './lib/http.mjs';
 
-/* A warm container keeps the catalog in memory so most requests touch neither
-   DynamoDB nor Square. */
+/* A warm container keeps the last build it read in memory, keyed by build id,
+   so a repeat request costs one small DynamoDB read and no parsing at all. */
 let warmCatalog = null;
 
-/* ------------------------------------------------------------- catalog */
-
-async function getCatalog(square, s, store, { force = false } = {}) {
-  const env = square.host.includes('sandbox') ? 'sandbox' : 'production';
-  const freshEnough = warmCatalog && Date.now() - warmCatalog.at < s.catalogTtlSeconds * 1000;
-  if (!force && freshEnough) return warmCatalog.snapshot;
-
-  if (!force) {
-    const cached = await store.readCatalog(env);
-    if (cached) {
-      warmCatalog = { snapshot: cached.snapshot, at: Date.now() };
-      return cached.snapshot;
-    }
-  }
-
-  try {
-    const snapshot = await buildCatalogSnapshot(square, s);
-    warmCatalog = { snapshot, at: Date.now() };
-    await store.writeCatalog(env, snapshot, s.catalogTtlSeconds)
-      .catch(err => console.error('catalog_cache_write_failed', err?.message));
-    return snapshot;
-  } catch (err) {
-    /* Square being down should not empty the shop. An old catalog, clearly
-       labelled as old, beats a blank page — and checkout revalidates against
-       Square anyway, so nothing stale can actually be sold at a stale price. */
-    const stale = await store.readCatalogStale(env).catch(() => null);
-    if (stale) {
-      console.error('catalog_serving_stale', err?.message);
-      warmCatalog = { snapshot: { ...stale.snapshot, stale: true }, at: Date.now() };
-      return warmCatalog.snapshot;
-    }
-    throw err;
+/* Nothing reachable over HTTP is allowed to rebuild the catalog. Rebuilding
+   means paging all of Square, which took longer than the function's timeout
+   and far longer than API Gateway's thirty seconds. Browsing reads the
+   snapshot the scheduled refresh left behind, or says it is not ready yet. */
+export class CatalogNotReadyError extends Error {
+  constructor(reason) {
+    super(reason === 'unreadable'
+      ? 'The shop catalog is being rebuilt. Please try again in a moment.'
+      : 'The shop is still loading its catalog for the first time. Please try again in a moment.');
+    this.name = 'CatalogNotReadyError';
+    this.reason = reason;
   }
 }
 
+async function getCatalog(ctx) {
+  const { s, store, cfg } = ctx;
+  const env = cfg.environment;
+
+  const pointer = await store.readCatalogPointer(env);
+  if (!pointer?.buildId) throw new CatalogNotReadyError('no_snapshot');
+
+  if (warmCatalog && warmCatalog.buildId === pointer.buildId) return warmCatalog;
+
+  const snapshot = await store.readCatalogBuild(env, pointer.buildId, pointer.chunkCount);
+  if (!snapshot) {
+    /* The pointer names a build whose chunks will not read back. That should
+       be impossible now builds are published atomically, so it is logged as
+       the anomaly it is rather than quietly swallowed. */
+    console.error('catalog_pointer_unreadable', JSON.stringify({ env, buildId: pointer.buildId }));
+    throw new CatalogNotReadyError('unreadable');
+  }
+
+  const builtAt = Number(pointer.builtAt || 0);
+  warmCatalog = {
+    snapshot,
+    buildId: pointer.buildId,
+    fetchedAt: pointer.fetchedAt || null,
+    builtAt: builtAt || null
+  };
+  return warmCatalog;
+}
+
+/* Age is reported from when the build was taken, not from when this container
+   happened to read it. */
+function freshness(entry, s) {
+  const basis = entry.builtAt || Date.parse(entry.fetchedAt || '') || 0;
+  const ageSeconds = basis ? Math.max(0, Math.round((Date.now() - basis) / 1000)) : null;
+  return {
+    fetchedAt: entry.fetchedAt,
+    buildId: entry.buildId,
+    ageSeconds,
+    /* Stale means "older than we aim for", not "wrong". It is still served,
+       and checkout re-reads prices and stock from Square regardless. */
+    stale: ageSeconds !== null && ageSeconds > s.catalogTtlSeconds
+  };
+}
+
 async function handleCatalog(event, ctx) {
-  const { square, s, store } = ctx;
-  const snapshot = await getCatalog(square, s, store);
+  const { s } = ctx;
+  const entry = await getCatalog(ctx);
+  const snapshot = entry.snapshot;
 
   const limit = Math.min(Math.max(Number.parseInt(query(event, 'limit') || '', 10) || s.catalogPageSize, 1), 300);
   const offset = Math.max(Number.parseInt(query(event, 'cursor') || '', 10) || 0, 0);
@@ -94,8 +118,7 @@ async function handleCatalog(event, ctx) {
   return reply(200, event, {
     success: true,
     environment: ctx.cfg.environment,
-    fetchedAt: snapshot.fetchedAt,
-    stale: snapshot.stale === true,
+    ...freshness(entry, s),
     total: snapshot.products.length,
     /* Categories and counts ride along on the first page only, so later pages
        stay small. */
@@ -110,32 +133,91 @@ async function handleCatalog(event, ctx) {
   });
 }
 
+/* Asks for a refresh; does not perform one. A full rebuild takes minutes and
+   would be cut off by API Gateway long before it finished, so this hands the
+   job to a background invocation of this same function and answers at once. */
 async function handleRefresh(event, ctx) {
-  const { cfg, square, s, store } = ctx;
-  if (!cfg.adminKey) {
-    return reply(404, event, { success: false, error: 'NOT_FOUND', message: 'Refresh is switched off.' },
-      { allowedOrigins: s.allowedOrigins });
-  }
-  const provided = header(event, 'x-admin-key') || '';
-  if (sha256(provided) !== sha256(cfg.adminKey)) {
-    return reply(403, event, { success: false, error: 'FORBIDDEN', message: 'Wrong admin key.' },
-      { allowedOrigins: s.allowedOrigins });
-  }
-  warmCatalog = null;
-  const snapshot = await getCatalog(square, s, store, { force: true });
-  return reply(200, event, {
-    success: true, fetchedAt: snapshot.fetchedAt, counts: snapshot.counts
+  const { cfg, s, store } = ctx;
+  const refused = adminRejection(event, cfg, s);
+  if (refused) return refused;
+
+  const status = await store.readCatalogStatus(cfg.environment).catch(() => null);
+  const triggered = await triggerBackgroundRefresh(cfg.environment);
+
+  return reply(triggered.ok ? 202 : 503, event, {
+    success: triggered.ok,
+    accepted: triggered.ok,
+    message: triggered.ok
+      ? 'Refresh started in the background. It takes a few minutes; the current catalog keeps serving until it finishes.'
+      : 'Could not start a background refresh: ' + triggered.error,
+    lastSuccessAt: status?.lastSuccessAt ?? null,
+    lastError: status?.lastError ?? null
   }, { allowedOrigins: s.allowedOrigins });
 }
 
-/* ---------------------------------------------------------------- cart */
+/* Invokes this same Lambda again, asynchronously, with the refresh task. The
+   function name comes from the runtime, so there is nothing to configure
+   beyond the IAM permission to invoke itself. */
+async function triggerBackgroundRefresh(environment) {
+  const functionName = process.env.AWS_LAMBDA_FUNCTION_NAME;
+  if (!functionName) return { ok: false, error: 'not running in Lambda' };
+  try {
+    const { LambdaClient, InvokeCommand } = await import('@aws-sdk/client-lambda');
+    const client = new LambdaClient({});
+    await client.send(new InvokeCommand({
+      FunctionName: functionName,
+      InvocationType: 'Event',          /* fire and forget */
+      Payload: Buffer.from(JSON.stringify({ task: 'refresh-catalog', environment }))
+    }));
+    return { ok: true };
+  } catch (err) {
+    console.error('refresh_trigger_failed', err?.message);
+    return { ok: false, error: String(err?.message || err) };
+  }
+}
+
+/* What the scheduled refresh last did, for the launch checklist and for
+   working out why the shop is showing something old. */
+async function handleCatalogStatusRoute(event, ctx) {
+  const { cfg, s, store } = ctx;
+  const refused = adminRejection(event, cfg, s);
+  if (refused) return refused;
+
+  const env = cfg.environment;
+  const [pointer, status] = await Promise.all([
+    store.readCatalogPointer(env).catch(() => null),
+    store.readCatalogStatus(env).catch(() => null)
+  ]);
+  const builtAt = Number(pointer?.builtAt || 0);
+
+  return reply(200, event, {
+    success: true,
+    environment: env,
+    live: pointer ? {
+      buildId: pointer.buildId, chunkCount: pointer.chunkCount, bytes: pointer.bytes ?? null,
+      fetchedAt: pointer.fetchedAt, builtAt: builtAt || null,
+      ageSeconds: builtAt ? Math.round((Date.now() - builtAt) / 1000) : null,
+      counts: pointer.counts ?? null
+    } : null,
+    lastRefresh: status ? {
+      lastAttemptAt: status.lastAttemptAt ?? null,
+      lastSuccessAt: status.lastSuccessAt ?? null,
+      lastDurationMs: status.lastDurationMs ?? null,
+      lastError: status.lastError ?? null,
+      lastErrorAt: status.lastErrorAt ?? null,
+      running: status.running === true
+    } : null
+  }, { allowedOrigins: s.allowedOrigins });
+}
+
+/* ---------------------------------------------------------------- cart *//* ---------------------------------------------------------------- cart */
 
 async function handleCartValidate(event, ctx) {
   const { s, square, store } = ctx;
   const { body, error } = parseJsonBody(event);
   if (error) return reply(400, event, { success: false, error: 'BAD_JSON', message: error }, { allowedOrigins: s.allowedOrigins });
 
-  const snapshot = await getCatalog(square, s, store);
+  const { snapshot } = await getCatalog(ctx);
   const result = await reconcileCart(body.lines, { snapshot, settings: s, store });
   if (!result.ok) {
     return reply(400, event, { success: false, error: result.error, message: result.message },
@@ -701,6 +783,7 @@ const ROUTES = [
   ['POST', '/catalog/refresh', handleRefresh],
   ['POST', '/admin/sweep',     handleSweepRoute],
   ['GET',  '/admin/stuck',     handleStuckRoute],
+  ['GET',  '/admin/catalog',   handleCatalogStatusRoute],
   ['POST', '/admin/holds/release', handleManualReleaseRoute],
   ['POST', '/cart/validate',   handleCartValidate],
   ['POST', '/checkout',        handleCheckout],
@@ -712,12 +795,30 @@ export const handler = async (event) => {
   /* EventBridge calls this function directly with a plain object rather than
      an HTTP request, so the cleanup sweep needs no public route and no
      internet-facing surface of its own. */
-  if (event && event.task === 'sweep-abandoned-checkouts') {
-    const s = settings();
-    const cfg = await loadSecrets();
-    const square = createSquareClient(cfg);
-    const store = createStore({ tableName: s.tableName });
-    return sweepAbandonedCheckouts({ square, store, settings: s });
+  if (event && typeof event.task === 'string') {
+    try {
+      const s = settings();
+      const cfg = await loadSecrets();
+      const square = createSquareClient(cfg);
+      const store = createStore({ tableName: s.tableName });
+
+      if (event.task === 'sweep-abandoned-checkouts') {
+        return await sweepAbandonedCheckouts({ square, store, settings: s });
+      }
+      /* The slow one. Minutes of Square paging, with the whole Lambda timeout
+         to itself and no API Gateway waiting on the other end. */
+      if (event.task === 'refresh-catalog') {
+        return await refreshCatalog({ square, store, settings: s, environment: cfg.environment });
+      }
+      return { error: 'UNKNOWN_TASK', task: event.task };
+    } catch (err) {
+      /* A scheduled run that throws is just a stack trace nobody reads.
+         Log it as a named event so a metric filter can see it. */
+      console.error('scheduled_task_failed', JSON.stringify({
+        task: event.task, message: err?.message
+      }));
+      return { error: 'TASK_FAILED', task: event.task, message: String(err?.message || err) };
+    }
   }
 
   const method = methodOf(event);
@@ -745,6 +846,16 @@ export const handler = async (event) => {
     /* Checked by flag rather than by class, and before the general Square
        branch: a credential Square will not accept is a configuration fault,
        not something to hand the shopper a 401 about. */
+    if (err instanceof CatalogNotReadyError) {
+      /* Retryable and honest: the shop is not broken, it is not ready. */
+      return reply(503, event, {
+        success: false,
+        error: err.reason === 'unreadable' ? 'CATALOG_UNAVAILABLE' : 'CATALOG_WARMING',
+        message: err.message,
+        retryAfterSeconds: s.catalogWarmRetrySeconds,
+        requestId
+      }, { allowedOrigins: s.allowedOrigins });
+    }
     if (err?.authFailure === true) {
       console.error('square_auth_failed_request', requestId, err.message);
       return reply(500, event, {

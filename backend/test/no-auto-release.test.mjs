@@ -16,7 +16,7 @@ import assert from 'node:assert/strict';
 
 import {
   fakeDynamo, fakeSquareFetch, squareHandlers, LOCATION, baseEnv, secretsFake, INVENTORY
-} from './helpers.mjs';
+, warmCatalog } from './helpers.mjs';
 import { createStore } from '../lib/store.mjs';
 
 const ORIGIN = 'https://bellmorewebdesign.github.io';
@@ -143,7 +143,7 @@ test('stuck jobs can be listed', async () => {
    4. Our own error paths must not free a unit a live link can buy
    ------------------------------------------------------------------------ */
 
-async function bootstrap({ env = {}, handlers, ddb: shared } = {}) {
+async function bootstrap({ env = {}, handlers, ddb: shared, seed = true } = {}) {
   for (const [k, v] of Object.entries({ ...baseEnv(), ...env })) {
     if (v === null) delete process.env[k]; else process.env[k] = v;
   }
@@ -161,6 +161,7 @@ async function bootstrap({ env = {}, handlers, ddb: shared } = {}) {
     storeMod: { ...store, createStore: (o) => store.createStore({ ...o, client: ddb.client }) },
     stamp
   });
+  if (seed) await warmCatalog(handler);
   return { handler, ddb, calls: fetchImpl.calls };
 }
 

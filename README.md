@@ -70,9 +70,11 @@ order.html   what Square decided   -> js/order-page.js
   quantities and the customer's own details. Prices come from Square's catalog,
   the shipping charge from the shop's configured zones, and tax from the shop's
   own Square tax rules. A price edited in localStorage changes nothing.
-- **Browsing is cached; buying is not.** The shop page may be served from a
-  cache, and may be served a clearly-labelled stale copy while Square is
-  down. A checkout re-reads price and stock from Square for exactly the
+- **Browsing reads a snapshot; buying reads Square.** The product list is
+  rebuilt by a scheduled background job — 844 products and 5,869 variations
+  take minutes to page out of Square, far longer than any web request may
+  last — and the shop page reads whatever that job last published, with its
+  age shown. A checkout re-reads price and stock from Square for exactly the
   variations in that cart, every time, and refuses the sale outright if
   Square cannot answer.
 - **Only ids and quantities are stored locally.** Anything else goes stale, and
@@ -138,7 +140,8 @@ backend/
   lib/checkout.mjs     building the Square order and the payment link
   lib/webhook.mjs      signature verification and event interpretation
   lib/cleanup.mjs      cancels abandoned payment links, then frees their stock
-  test/                158 checks against a fake Square and an in-memory DynamoDB
+  lib/refresh.mjs      the scheduled catalog rebuild, and its atomic publish
+  test/                184 checks against a fake Square and an in-memory DynamoDB
 ```
 
 ```bash

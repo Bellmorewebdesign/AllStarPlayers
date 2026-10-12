@@ -137,67 +137,182 @@ export function createStore({ tableName, client } = {}) {
 
   /* ------------------------------------------------------ catalog cache */
 
-  async function readCatalog(env) {
-    const manifest = await get('CATALOG#' + env, 'MANIFEST');
-    if (!manifest) return null;
-    if (manifest.expiresAt && manifest.expiresAt <= nowSec()) return null;
+  /* The catalog is far too big to rebuild inside an HTTP request — 844
+     products and 5,869 variations take minutes of Square paging, and API
+     Gateway gives up at thirty seconds. So building and serving are entirely
+     separate jobs, and these rows are the handover between them.
 
-    const rows = await queryPk('CATALOG#' + env);
+       CATALOG#<env>            / CURRENT   the pointer: which build is live
+       CATALOG#<env>#B<buildId> / CHUNK#n   that build's gzipped pages
+       CATALOG#<env>            / LOCK      one refresh at a time
+       CATALOG#<env>            / BUILDS    what exists, so orphans get swept
+       CATALOG#<env>            / STATUS    when it last ran, and how it went
+
+     Each build gets its OWN partition and the pointer is flipped once every
+     chunk has landed. That is what makes an interrupted refresh harmless:
+     a half-written build is sitting in a partition nothing points at, and
+     readers carry on with the previous complete snapshot. The earlier design
+     overwrote chunks in place, so a refresh killed halfway through left new
+     chunks under an old manifest — the two stitched together into something
+     that would not parse, and the shop went dark. */
+
+  const catalogPk = (env) => 'CATALOG#' + env;
+  const buildPk = (env, buildId) => 'CATALOG#' + env + '#B' + buildId;
+
+  function newBuildId() {
+    return new Date().toISOString().replace(/[-:.]/g, '').slice(0, 15) + 'Z-' +
+      Math.random().toString(36).slice(2, 8);
+  }
+
+  const readCatalogPointer = (env) => get(catalogPk(env), 'CURRENT');
+
+  async function readCatalogBuild(env, buildId, expectedChunks) {
+    const rows = await queryPk(buildPk(env, buildId));
     const chunks = rows
       .filter(r => typeof r.sk === 'string' && r.sk.startsWith('CHUNK#'))
       .sort((a, b) => a.sk.localeCompare(b.sk));
-    if (chunks.length !== manifest.chunkCount) return null;   /* half-written */
+
+    if (expectedChunks !== undefined && chunks.length !== expectedChunks) {
+      console.error('catalog_build_incomplete', JSON.stringify({
+        env, buildId, found: chunks.length, expected: expectedChunks
+      }));
+      return null;
+    }
+    if (!chunks.length) return null;
 
     try {
       const packed = Buffer.from(chunks.map(c => c.data).join(''), 'base64');
-      return { snapshot: JSON.parse(gunzipSync(packed).toString('utf8')), fetchedAt: manifest.fetchedAt };
+      return JSON.parse(gunzipSync(packed).toString('utf8'));
     } catch (err) {
-      console.error('catalog_cache_unreadable', err?.message);
+      console.error('catalog_build_unreadable', JSON.stringify({ env, buildId, message: err?.message }));
       return null;
     }
   }
 
-  async function writeCatalog(env, snapshot, ttlSeconds) {
+  /* What a browsing request calls. One small read for the pointer, then the
+     chunks it names. It never builds anything. */
+  async function readCatalogSnapshot(env) {
+    const pointer = await readCatalogPointer(env);
+    if (!pointer?.buildId) return null;
+    const snapshot = await readCatalogBuild(env, pointer.buildId, pointer.chunkCount);
+    if (!snapshot) return { pointer, snapshot: null, unreadable: true };
+    return {
+      pointer, snapshot, unreadable: false,
+      buildId: pointer.buildId,
+      fetchedAt: pointer.fetchedAt,
+      builtAt: pointer.builtAt ?? null
+    };
+  }
+
+  /* ---- writing a build: chunks first, pointer last, prune afterwards ---- */
+
+  async function writeCatalogBuild(env, buildId, snapshot) {
     const packed = gzipSync(Buffer.from(JSON.stringify(snapshot), 'utf8')).toString('base64');
     const parts = [];
     for (let i = 0; i < packed.length; i += CHUNK_BYTES) parts.push(packed.slice(i, i + CHUNK_BYTES));
-    const expiresAt = nowSec() + ttlSeconds;
-    /* A generous TTL on the rows themselves: `expiresAt` is what decides
-       freshness, while `ttl` only stops dead rows piling up. Keeping the rows
-       a little longer means a Square outage can still be served stale rather
-       than showing an empty shop. */
-    const ttl = nowSec() + Math.max(ttlSeconds * 6, 3600);
 
     for (const group of chunkArray(parts.map((data, i) => ({
-      pk: 'CATALOG#' + env, sk: 'CHUNK#' + String(i).padStart(4, '0'), data, ttl
+      /* No TTL. A published build must not evaporate because refreshes
+         stopped for a while; orphans are swept by pruneCatalogBuilds
+         instead, which is deliberate rather than silent. */
+      pk: buildPk(env, buildId), sk: 'CHUNK#' + String(i).padStart(4, '0'), data
     })), 25)) {
       await batchWrite(group.map(item => ({
         PutRequest: { Item: marshall(item, { removeUndefinedValues: true }) }
       })));
     }
-    /* The manifest goes last on purpose. Until it lands, a reader sees the
-       previous manifest and the previous chunk count, so it never stitches
-       half of one snapshot onto half of another. */
-    await put({
-      pk: 'CATALOG#' + env, sk: 'MANIFEST',
-      chunkCount: parts.length, fetchedAt: snapshot.fetchedAt,
-      productCount: snapshot.counts?.products ?? 0,
-      expiresAt, ttl
-    });
     return { chunkCount: parts.length, bytes: packed.length };
   }
 
-  /* Used when Square is down: ignore freshness and serve whatever is there. */
-  async function readCatalogStale(env) {
-    const manifest = await get('CATALOG#' + env, 'MANIFEST');
-    if (!manifest) return null;
-    const rows = await queryPk('CATALOG#' + env);
-    const chunks = rows.filter(r => String(r.sk).startsWith('CHUNK#')).sort((a, b) => a.sk.localeCompare(b.sk));
-    if (chunks.length !== manifest.chunkCount) return null;
+  /* The flip. One write, and the new catalog is live. Everything before this
+     was invisible; nothing after it is half-done. */
+  async function publishCatalogBuild(env, meta) {
+    const previous = await readCatalogPointer(env);
+    await put({
+      pk: catalogPk(env), sk: 'CURRENT',
+      buildId: meta.buildId,
+      chunkCount: meta.chunkCount,
+      bytes: meta.bytes ?? null,
+      fetchedAt: meta.fetchedAt,
+      builtAt: Date.now(),
+      counts: meta.counts ?? null
+    });
+    return { previousBuildId: previous?.buildId ?? null };
+  }
+
+  /* Remember a build the moment it is started, so a refresh that dies
+     halfway leaves a trail and the next run can clear up after it. */
+  async function noteCatalogBuild(env, buildId) {
+    const row = await get(catalogPk(env), 'BUILDS');
+    const ids = Array.isArray(row?.ids) ? row.ids : [];
+    const next = [...new Set([...ids, buildId])].slice(-12);
+    await put({ pk: catalogPk(env), sk: 'BUILDS', ids: next });
+  }
+
+  /* Delete every build that is not the live one. Self-healing: an orphan
+     left by a crashed refresh goes on the next successful run. */
+  async function pruneCatalogBuilds(env, keepBuildId) {
+    const row = await get(catalogPk(env), 'BUILDS');
+    const ids = Array.isArray(row?.ids) ? row.ids : [];
+    const doomed = ids.filter(id => id && id !== keepBuildId);
+
+    for (const id of doomed) {
+      const rows = await queryPk(buildPk(env, id));
+      for (const group of chunkArray(rows, 25)) {
+        await batchWrite(group.map(r => ({ DeleteRequest: { Key: marshall({ pk: r.pk, sk: r.sk }) } })))
+          .catch(err => console.error('catalog_prune_failed', id, err?.message));
+      }
+    }
+    await put({ pk: catalogPk(env), sk: 'BUILDS', ids: keepBuildId ? [keepBuildId] : [] });
+    return { pruned: doomed };
+  }
+
+  /* --------------------------- one refresh at a time --------------------- */
+
+  /* A lease rather than a flag, so a refresh killed by a Lambda timeout does
+     not wedge the schedule forever. The lease must outlast the function's own
+     timeout — see REFRESH_LEASE_SECONDS in DEPLOY.md — which is why there is
+     no heartbeat to get wrong. */
+  async function acquireCatalogLock(env, { holder, leaseSeconds = 600 } = {}) {
+    const now = nowSec();
     try {
-      const packed = Buffer.from(chunks.map(c => c.data).join(''), 'base64');
-      return { snapshot: JSON.parse(gunzipSync(packed).toString('utf8')), fetchedAt: manifest.fetchedAt, stale: true };
-    } catch { return null; }
+      await ddb.send(new PutItemCommand({
+        TableName: tableName,
+        Item: marshall({
+          pk: catalogPk(env), sk: 'LOCK',
+          holder, startedAt: Date.now(), leaseUntil: now + leaseSeconds
+        }),
+        ConditionExpression: 'attribute_not_exists(pk) OR leaseUntil < :now',
+        ExpressionAttributeValues: marshall({ ':now': now })
+      }));
+      return { acquired: true };
+    } catch (err) {
+      if (err?.name !== 'ConditionalCheckFailedException') throw err;
+      const held = await get(catalogPk(env), 'LOCK');
+      return { acquired: false, heldBy: held?.holder ?? null, leaseUntil: held?.leaseUntil ?? null };
+    }
+  }
+
+  async function releaseCatalogLock(env, holder) {
+    await ddb.send(new DeleteItemCommand({
+      TableName: tableName,
+      Key: marshall({ pk: catalogPk(env), sk: 'LOCK' }),
+      ConditionExpression: '#h = :holder',
+      ExpressionAttributeNames: { '#h': 'holder' },
+      ExpressionAttributeValues: marshall({ ':holder': holder })
+    })).catch(err => {
+      /* Somebody else's lease: leave it alone. */
+      if (err?.name !== 'ConditionalCheckFailedException') {
+        console.error('catalog_lock_release_failed', err?.message);
+      }
+    });
+  }
+
+  const readCatalogStatus = (env) => get(catalogPk(env), 'STATUS');
+
+  async function recordCatalogStatus(env, patch) {
+    const existing = (await get(catalogPk(env), 'STATUS')) || {};
+    await put({ pk: catalogPk(env), sk: 'STATUS', ...existing, ...patch, updatedAt: Date.now() });
   }
 
   /* -------------------------------------------------------- idempotency */
@@ -583,7 +698,10 @@ export function createStore({ tableName, client } = {}) {
   }
 
   return {
-    readCatalog, readCatalogStale, writeCatalog,
+    readCatalogPointer, readCatalogBuild, readCatalogSnapshot,
+    writeCatalogBuild, publishCatalogBuild, noteCatalogBuild, pruneCatalogBuilds,
+    acquireCatalogLock, releaseCatalogLock,
+    readCatalogStatus, recordCatalogStatus, newBuildId,
     enqueueSweep, dueSweeps, deleteSweep, rescheduleSweep, stuckSweeps, sweepForAttempt,
     markIdempotencyCanceled,
     claimIdempotency, completeIdempotency, markIdempotencyRecoverable,
