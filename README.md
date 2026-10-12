@@ -70,6 +70,11 @@ order.html   what Square decided   -> js/order-page.js
   quantities and the customer's own details. Prices come from Square's catalog,
   the shipping charge from the shop's configured zones, and tax from the shop's
   own Square tax rules. A price edited in localStorage changes nothing.
+- **Browsing is cached; buying is not.** The shop page may be served from a
+  cache, and may be served a clearly-labelled stale copy while Square is
+  down. A checkout re-reads price and stock from Square for exactly the
+  variations in that cart, every time, and refuses the sale outright if
+  Square cannot answer.
 - **Only ids and quantities are stored locally.** Anything else goes stale, and
   a stale price in storage is exactly what an attacker would like to edit.
 - **Unknown stock is not unlimited stock.** A variation Square is not counting
@@ -78,6 +83,12 @@ order.html   what Square decided   -> js/order-page.js
   online; the card says it is priced in store.
 - **A payment link is not a payment.** Neither is a redirect. The order page
   asks our API, which asks Square, and says "checking" until it knows.
+- **Two shoppers cannot be sold the same last unit.** Holds on a variation
+  live in one row and are taken with a single conditional write, so the race
+  is settled by DynamoDB rather than by luck. What that does *not* cover is
+  written down in `backend/DEPLOY.md` §9 rather than glossed over.
+- **Buy Now never empties your cart**, even when you buy something that is
+  already in it.
 - **Nothing is promised that is not built.** No UPS rates, no tracking numbers,
   no automated pickup email, no guaranteed stock reservation. Where a
   limitation exists, the page says so.
@@ -119,7 +130,7 @@ backend/
   lib/fulfillment.mjs  pickup and shipping validation, configured rates
   lib/checkout.mjs     building the Square order and the payment link
   lib/webhook.mjs      signature verification and event interpretation
-  test/                78 checks against a fake Square and an in-memory DynamoDB
+  test/                110 checks against a fake Square and an in-memory DynamoDB
 ```
 
 ```bash

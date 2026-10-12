@@ -186,7 +186,12 @@ function normaliseVariation(variation, { locationId, images, options, inventoryC
 export function normaliseCatalog(buckets, {
   locationId,
   inventoryCounts = new Map(),
-  sellUntracked = false
+  sellUntracked = false,
+  /* The storefront grid only wants things it can sell. The checkout
+     verification wants everything it asked about, sellable or not, so it can
+     tell a customer *why* their size has gone rather than just that the item
+     "is no longer on the website". */
+  keepUnsellable = false
 }) {
   const { items, categories, images, options, taxes } = buckets;
   const products = [];
@@ -212,7 +217,7 @@ export function normaliseCatalog(buckets, {
        whose every variation is out of stock, variable-priced or uncounted does
        not belong in the grid. */
     const sellableVariations = variations.filter(v => v.sellable);
-    if (!sellableVariations.length) continue;
+    if (!sellableVariations.length && !keepUnsellable) continue;
 
     const categoryIds = [];
     if (data.category_id) categoryIds.push(data.category_id);
@@ -222,7 +227,9 @@ export function normaliseCatalog(buckets, {
     for (const id of uniqueCategoryIds) usedCategories.set(id, categories.get(id));
 
     const itemImages = (data.image_ids || []).map(id => images.get(id)).filter(Boolean);
-    const prices = sellableVariations.map(v => v.price.amount);
+    const priced = (sellableVariations.length ? sellableVariations : variations)
+      .filter(v => v.price);
+    const prices = priced.map(v => v.price.amount);
 
     /* The option axes this item actually varies along, in the order Square
        lists them, so the storefront can build one selector per axis. An item
@@ -247,11 +254,9 @@ export function normaliseCatalog(buckets, {
       taxIds: (data.tax_ids || []).filter(id => taxes.has(id)),
       optionAxes: axes,
       variations,
-      priceRange: {
-        min: Math.min(...prices),
-        max: Math.max(...prices),
-        currency: sellableVariations[0].price.currency
-      },
+      priceRange: prices.length
+        ? { min: Math.min(...prices), max: Math.max(...prices), currency: priced[0].price.currency }
+        : { min: null, max: null, currency: null },
       /* True when some variation exists that we cannot price. The storefront
          says "other options in store" rather than hiding the fact. */
       hasUnpriceableVariations: variations.some(v => v.unsellableReason === 'VARIABLE_PRICE'),
@@ -330,4 +335,155 @@ export function indexVariations(snapshot) {
     }
   }
   return index;
+}
+
+/* ==========================================================================
+   Checkout-time verification
+   --------------------------------------------------------------------------
+   Browsing may be served from a cache, and may even be served stale when
+   Square is down, because nothing on the shop page is what gets charged.
+
+   Authorising a purchase is a different matter. This path asks Square about
+   exactly the variations in the cart, every time, and never consults the
+   cache. If Square cannot answer, the checkout is refused rather than guessed
+   at: see AvailabilityUnverifiedError.
+   ========================================================================== */
+
+export class AvailabilityUnverifiedError extends Error {
+  constructor(cause) {
+    super('We could not confirm availability with our store system. Nothing has been charged — please try again in a moment.');
+    this.name = 'AvailabilityUnverifiedError';
+    this.cause = cause;
+  }
+}
+
+/* Square's batch endpoint takes up to 1000 ids; a cart is capped far below
+   that, but the chunking keeps the promise honest if the cap ever moves. */
+const BATCH_OBJECT_LIMIT = 500;
+
+async function batchRetrieve(square, ids) {
+  const objects = []; const related = [];
+  for (const group of chunk([...new Set(ids)], BATCH_OBJECT_LIMIT)) {
+    if (!group.length) continue;
+    const res = await square.call('/v2/catalog/batch-retrieve', {
+      method: 'POST',
+      body: { object_ids: group, include_related_objects: true, include_deleted_objects: false }
+    });
+    objects.push(...(res.objects || []));
+    related.push(...(res.related_objects || []));
+  }
+  return { objects, related };
+}
+
+export async function verifyVariationsLive(square, variationIds, s) {
+  const locationId = square.locationId;
+  const ids = [...new Set(variationIds)].filter(Boolean);
+  if (!ids.length) {
+    return { products: [], categories: [], taxes: [], fetchedAt: new Date().toISOString(), verified: true };
+  }
+
+  try {
+    /* Pass one: the variations themselves, and whatever Square volunteers
+       alongside them. */
+    const first = await batchRetrieve(square, ids);
+    const pool = [...first.objects, ...first.related];
+
+    const variations = pool.filter(o => o.type === 'ITEM_VARIATION' && !o.is_deleted);
+    const itemsById = new Map();
+    for (const o of pool) if (o.type === 'ITEM' && !o.is_deleted) itemsById.set(o.id, o);
+
+    const categories = new Map();
+    const images = new Map();
+    const options = new Map();
+    const taxes = new Map();
+    for (const o of pool) {
+      if (o.is_deleted) continue;
+      if (o.type === 'CATEGORY') categories.set(o.id, o.category_data?.name || '');
+      if (o.type === 'IMAGE' && o.image_data?.url) images.set(o.id, o.image_data.url);
+      if (o.type === 'ITEM_OPTION') options.set(o.id, o);
+      if (o.type === 'TAX') taxes.set(o.id, o);
+    }
+
+    /* Pass two: anything the variations and their items point at that did not
+       come back — the tax rules above all, because an order built without
+       them would charge the wrong total. */
+    const wanted = new Set();
+    for (const item of itemsById.values()) {
+      for (const id of item.item_data?.tax_ids || []) if (!taxes.has(id)) wanted.add(id);
+      for (const id of item.item_data?.image_ids || []) if (!images.has(id)) wanted.add(id);
+    }
+    for (const v of variations) {
+      for (const ref of v.item_variation_data?.item_option_values || []) {
+        if (!options.has(ref.item_option_id)) wanted.add(ref.item_option_id);
+      }
+    }
+    if (wanted.size) {
+      const second = await batchRetrieve(square, [...wanted]);
+      for (const o of [...second.objects, ...second.related]) {
+        if (o.is_deleted) continue;
+        if (o.type === 'TAX') taxes.set(o.id, o);
+        if (o.type === 'IMAGE' && o.image_data?.url) images.set(o.id, o.image_data.url);
+        if (o.type === 'ITEM_OPTION') options.set(o.id, o);
+        if (o.type === 'CATEGORY') categories.set(o.id, o.category_data?.name || '');
+      }
+    }
+
+    /* Rebuild each item carrying only the variations we asked about, so the
+       normaliser works on exactly the cart and nothing else. */
+    const wantedIds = new Set(ids);
+
+    /* A standalone ITEM_VARIATION names its parent in item_id. Belt and
+       braces: if that is missing, find the item that lists this variation.
+       Losing the link would mean reporting a real variation as "no longer on
+       the website", which is both wrong and alarming to a customer. */
+    const parentByVariation = new Map();
+    for (const item of itemsById.values()) {
+      for (const v of item.item_data?.variations || []) {
+        if (v?.id) parentByVariation.set(v.id, item.id);
+      }
+    }
+
+    const byItem = new Map();
+    for (const v of variations) {
+      if (!wantedIds.has(v.id)) continue;
+      const itemId = v.item_variation_data?.item_id || parentByVariation.get(v.id);
+      if (!itemId) { console.error('variation_without_parent', v.id); continue; }
+      if (!byItem.has(itemId)) byItem.set(itemId, []);
+      byItem.get(itemId).push(v);
+    }
+
+    const items = [];
+    for (const [itemId, vars] of byItem) {
+      const item = itemsById.get(itemId);
+      if (!item) continue;
+      items.push({ ...item, item_data: { ...(item.item_data || {}), variations: vars } });
+    }
+
+    /* Only ask about stock for variations Square says it is counting. */
+    const tracked = [];
+    for (const v of variations) {
+      if (!wantedIds.has(v.id)) continue;
+      const vd = v.item_variation_data || {};
+      const override = (vd.location_overrides || []).find(o => o?.location_id === locationId);
+      const isTracked = override ? (override.track_inventory ?? vd.track_inventory ?? false)
+                                 : (vd.track_inventory ?? false);
+      if (isTracked) tracked.push(v.id);
+    }
+    const inventoryCounts = await fetchInventory(square, tracked, {
+      locationId, batchSize: s.inventoryBatchSize
+    });
+
+    const normalised = normaliseCatalog(
+      { items, categories, images, options, taxes },
+      { locationId, inventoryCounts, sellUntracked: s.sellUntrackedVariations, keepUnsellable: true }
+    );
+
+    return { ...normalised, fetchedAt: new Date().toISOString(), verified: true };
+  } catch (err) {
+    /* Square could not be asked, or would not answer. The one thing we must
+       not do is fall back to a cached price or a cached stock level and let
+       the sale through. */
+    console.error('availability_unverified', err?.message);
+    throw new AvailabilityUnverifiedError(err);
+  }
 }

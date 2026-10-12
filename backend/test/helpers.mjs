@@ -5,15 +5,29 @@
 
 import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
 
-export function fakeDynamo() {
-  const rows = new Map();                       /* "pk\u0000sk" -> plain object */
+/* `delay` yields to the event loop on every call, which makes two concurrent
+   handler invocations genuinely interleave rather than running to completion
+   one after the other. `failOnce` makes one named command throw, to stand in
+   for a transient DynamoDB failure or a Lambda killed mid-flight. */
+export function fakeDynamo({ delay = false, failOnce = null, rows: seed } = {}) {
+  const rows = seed || new Map();               /* "pk\u0000sk" -> plain object */
   const key = (pk, sk) => pk + '\u0000' + sk;
   const calls = [];
+  const failures = { ...(failOnce || {}) };
+  const unprocessOnce = new Set();
 
-  function conditionHolds(expr, existing) {
+  function conditionHolds(expr, existing, input) {
     if (!expr) return true;
     if (expr === 'attribute_not_exists(pk)') return existing === undefined;
     if (expr === 'attribute_exists(pk)') return existing !== undefined;
+    /* The optimistic-concurrency check the hold rows use. */
+    const version = expr.match(/^#?(\w+) = :(\w+)$/);
+    if (version) {
+      const names = input.ExpressionAttributeNames || {};
+      const attr = names['#' + version[1]] || version[1];
+      const values = unmarshall(input.ExpressionAttributeValues || {});
+      return existing !== undefined && existing[attr] === values[':' + version[2]];
+    }
     throw new Error('fakeDynamo does not implement condition: ' + expr);
   }
 
@@ -28,11 +42,25 @@ export function fakeDynamo() {
       const name = cmd.constructor.name;
       const input = cmd.input;
       calls.push(name);
+      if (delay) await new Promise(r => setTimeout(r, 0));
+
+      /* A targeted one-shot failure: { UpdateItemCommand: 'ORDER#' } throws the
+         first time an UpdateItem touches a key starting with that prefix. */
+      const trigger = failures[name];
+      if (trigger !== undefined) {
+        const k = input.Key ? unmarshall(input.Key) : (input.Item ? unmarshall(input.Item) : {});
+        if (trigger === true || String(k.pk || '').startsWith(trigger)) {
+          delete failures[name];
+          const err = new Error('simulated DynamoDB failure on ' + name);
+          err.name = 'ProvisionedThroughputExceededException';
+          throw err;
+        }
+      }
 
       if (name === 'PutItemCommand') {
         const item = unmarshall(input.Item);
         const k = key(item.pk, item.sk);
-        if (!conditionHolds(input.ConditionExpression, rows.get(k))) throw fail();
+        if (!conditionHolds(input.ConditionExpression, rows.get(k), input)) throw fail();
         rows.set(k, item);
         return {};
       }
@@ -61,7 +89,7 @@ export function fakeDynamo() {
         const { pk, sk } = unmarshall(input.Key);
         const k = key(pk, sk);
         const existing = rows.get(k);
-        if (!conditionHolds(input.ConditionExpression, existing)) throw fail();
+        if (!conditionHolds(input.ConditionExpression, existing, input)) throw fail();
         const values = unmarshall(input.ExpressionAttributeValues);
         const names = input.ExpressionAttributeNames || {};
         const next = { ...(existing || { pk, sk }) };
@@ -74,8 +102,19 @@ export function fakeDynamo() {
       }
 
       if (name === 'BatchWriteItemCommand') {
-        for (const [, reqs] of Object.entries(input.RequestItems)) {
-          for (const r of reqs) {
+        /* The real BatchWriteItem is allowed to silently drop writes and hand
+           them back in UnprocessedItems. Callers that ignore that field lose
+           data, so the fake does it too on the first call per table. */
+        const out = {};
+        for (const [table, reqs] of Object.entries(input.RequestItems)) {
+          let todo = reqs;
+          if (unprocessOnce.has(table)) {
+            unprocessOnce.delete(table);
+            const held = reqs.slice(0, Math.min(1, reqs.length));
+            todo = reqs.slice(held.length);
+            if (held.length) out[table] = held;
+          }
+          for (const r of todo) {
             if (r.PutRequest) {
               const item = unmarshall(r.PutRequest.Item);
               rows.set(key(item.pk, item.sk), item);
@@ -85,7 +124,7 @@ export function fakeDynamo() {
             }
           }
         }
-        return {};
+        return Object.keys(out).length ? { UnprocessedItems: out } : {};
       }
 
       throw new Error('fakeDynamo does not implement ' + name);
@@ -95,6 +134,8 @@ export function fakeDynamo() {
   return {
     client, calls,
     rows,
+    /* Make the next BatchWriteItem for this table leave one write undone. */
+    dropNextBatchWrite: (table = 'asp-store-test') => unprocessOnce.add(table),
     dump: () => [...rows.values()],
     find: (prefix) => [...rows.values()].filter(r => String(r.pk).startsWith(prefix))
   };
@@ -290,12 +331,35 @@ export function inventoryResponse(ids) {
   };
 }
 
+/* Square answers a batch-retrieve of variation ids with the variations
+   themselves (each naming its parent in item_id) plus the parent items in
+   related_objects. This is the call the checkout verification makes. */
+export function batchRetrieveResponse(objectIds) {
+  const wanted = new Set(objectIds || []);
+  const objects = []; const related = [];
+  for (const obj of catalogFixture().objects) {
+    if (obj.type === 'ITEM') {
+      const hits = (obj.item_data.variations || []).filter(v => wanted.has(v.id));
+      if (hits.length) {
+        objects.push(...hits.map(v => ({
+          ...v, item_variation_data: { ...v.item_variation_data, item_id: obj.id }
+        })));
+        related.push(obj);
+      }
+    }
+    if (wanted.has(obj.id)) objects.push(obj);
+  }
+  return { objects, related_objects: related };
+}
+
 /* The handler map most tests want. */
 export function squareHandlers(overrides = {}) {
   return {
     'GET /v2/catalog/list': () => ({ json: catalogFixture() }),
     'POST /v2/inventory/counts/batch-retrieve': ({ body }) =>
       ({ json: inventoryResponse(body.catalog_object_ids || []) }),
+    'POST /v2/catalog/batch-retrieve': ({ body }) =>
+      ({ json: batchRetrieveResponse(body.object_ids || []) }),
     ...overrides
   };
 }

@@ -102,7 +102,9 @@ test('a variable-price item cannot be carted', async () => {
 
 test('soft holds from another attempt take stock off the shelf', async () => {
   const { snapshot, s, store } = await fixture();
-  await store.placeHolds('other-attempt-1', [{ variationId: 'VAR_HAT_A', quantity: 2 }], { holdSeconds: 900 });
+  const got = await store.acquireHolds('other-attempt-1', [{ variationId: 'VAR_HAT_A', quantity: 2 }],
+    { holdSeconds: 900, availability: new Map([['VAR_HAT_A', 2]]) });
+  assert.equal(got.ok, true);
 
   const blocked = await reconcileCart([{ variationId: 'VAR_HAT_A', quantity: 2 }], { snapshot, settings: s, store });
   assert.equal(blocked.payableLines.length, 0, 'both units are held by someone else');

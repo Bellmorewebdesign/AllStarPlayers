@@ -157,7 +157,16 @@ export async function reconcileCart(rawLines, {
       currency: variation.price.currency,
       requestedQuantity: requested.quantity,
       quantity,
+      /* `available` is what THIS shopper can have: the shelf count minus what
+         other in-flight checkouts are holding. It is the number the cart page
+         caps its stepper at.
+
+         `onHand` is the raw shelf count, with nothing subtracted. The hold
+         acquisition needs that one, because it subtracts the other holds
+         itself — handing it `available` would take them off twice and refuse
+         a sale that was perfectly possible. */
       available,
+      onHand: variation.inventory.state === 'UNKNOWN' ? null : (variation.inventory.quantity ?? 0),
       inventoryState: variation.inventory.state,
       taxIds: product.taxIds,
       removed: quantity === 0
@@ -203,22 +212,41 @@ function messageForUnsellable(product, variation) {
   }
 }
 
-/* A stable fingerprint of what is being bought. Two attempts with the same
-   contents and the same fulfillment choice are the same attempt; change a
-   quantity and it becomes a different one. This is what makes the
-   idempotency key survive a retry but not survive an edit. */
+/* A stable fingerprint of what is being bought, and of where it is going.
+
+   Two requests with the same fingerprint are the same attempt, so a retried
+   fetch replays one order instead of placing two. Change anything that would
+   alter the parcel, the receipt or who gets telephoned, and it becomes a
+   different attempt.
+
+   That means every field that reaches Square's order has to be in here. A
+   missed one — the apartment number, say — meant two genuinely different
+   deliveries collapsing onto a single order. Cosmetic differences are
+   normalised away first, so trailing spaces and capital letters are not
+   mistaken for a different customer.
+
+   `source` is deliberately absent: buying the same thing from the cart or
+   from Buy Now is the same purchase and must not double up. */
+function norm(v) {
+  return String(v ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
 export function cartFingerprint(payableLines, fulfillment) {
   const items = payableLines
     .map(l => l.variationId + 'x' + l.quantity)
     .sort()
     .join('|');
+
   const f = fulfillment || {};
-  const fulfillmentKey = [
-    f.type || '',
-    f.zoneId || '',
-    (f.address?.postalCode || '').toUpperCase(),
-    (f.address?.line1 || '').trim().toLowerCase(),
-    (f.contact?.email || '').trim().toLowerCase()
-  ].join('~');
-  return items + '::' + fulfillmentKey;
+  const c = f.contact || {};
+  const a = f.address || {};
+  const parts = [
+    norm(f.type),
+    norm(f.zoneId),
+    norm(c.firstName), norm(c.lastName), norm(c.email),
+    /* Punctuation in a phone number is not a different phone number. */
+    String(c.phone ?? '').replace(/\D/g, ''),
+    norm(a.line1), norm(a.line2), norm(a.city), norm(a.state), norm(a.postalCode), norm(a.country)
+  ];
+  return items + '::' + parts.join('~');
 }

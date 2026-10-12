@@ -177,6 +177,7 @@ Commas inside the JSON need escaping on the CLI; the console is easier for
 | `CATALOG_TTL_SECONDS` | 600 | how stale browsing may be; checkout always revalidates |
 | `APPLY_CATALOG_TAXES` | `true` | attach the shop's own Square tax rules to the order |
 | `SQUARE_ASK_FOR_SHIPPING_ADDRESS` | `false` | see §7 |
+| `INFLIGHT_RECOVERY_MS` | 15000 | how long a half-finished checkout or webhook is left alone before another request takes it over |
 | `ORDER_RETENTION_DAYS` | 90 | how long order rows live |
 | `MAX_CART_LINES` / `MAX_LINE_QUANTITY` | 40 / 20 | ceilings |
 
@@ -307,30 +308,62 @@ If you need destination-based sales tax for shipped orders, that is not built
 and would need Square's tax settings extended or a tax service added. Say so
 and it can be scoped.
 
+## 8a. What happens at the moment of checkout
+
+Browsing is cached. **Buying is not.** `POST /checkout` ignores the cache
+entirely and asks Square, every single time, about exactly the variations in
+that cart:
+
+1. `POST /v2/catalog/batch-retrieve` for the cart's variations, with their
+   items, taxes, options and images. That is where the price comes from.
+2. A second `batch-retrieve` only if a tax, option or image was not included
+   the first time.
+3. `POST /v2/inventory/counts/batch-retrieve` for whichever of them Square is
+   counting.
+
+If any of those fails, the checkout returns **503 `AVAILABILITY_UNVERIFIED`**
+and no payment link is made. It never falls back to the cached catalog, and
+never to the stale copy served during a Square outage. A shop window may be a
+minute out of date; an order may not.
+
+So a checkout costs two or three Square calls. Browsing costs none, because
+the catalog is cached. At this shop's volume that is nowhere near Square's
+rate limits, but it is the thing to look at first if you ever see 429s.
+
 ## 9. Overselling — what is and is not protected
 
 Plainly: **a stock check is not a reservation, and this does not guarantee
-stock.**
+stock.** What follows is exactly how far it goes.
 
-What is implemented: a soft hold. When a checkout is created, the quantities
-go into DynamoDB for `STOCK_HOLD_SECONDS` (15 minutes). While that hold lives,
-*this website* subtracts it from what it offers other shoppers, so two
-browsers cannot both be promised the last unit.
+**What is protected.** Every hold on a variation lives in one DynamoDB row,
+and taking a hold is a single conditional write against that row's version.
+Two Lambdas racing for the last unit cannot both read "one available" and both
+write a hold: the loser's write is rejected, it re-reads, and it sees the
+winner. One gets a payment link; the other is told the item has gone. A cart
+is held all-or-nothing, so nobody ends up half-reserved. Holds expire after
+`STOCK_HOLD_SECONDS` (15 minutes) and are dropped as they are read, so nothing
+has to sweep up after them, and they are released the moment an order is paid
+or cancelled.
 
-What that does not cover:
+**What is not protected, and cannot be without more work:**
 
 - **An in-store sale.** The shop sells the same rail to whoever is standing
-  there. Square has no API to reserve catalog stock for a hosted checkout, so
-  nothing here can stop that.
-- **A hold expiring** before the customer finishes paying on Square's page.
-- **Square's own inventory** is decremented when the payment completes, not
-  when the link is made.
+  there. Square has no API to reserve catalog stock for a hosted checkout.
+- **A hold lapsing before payment.** If a customer sits on Square's checkout
+  page for more than fifteen minutes, their hold goes and the unit is offered
+  to the next person.
+- **A stale payment link.** This is the sharp one. A Square payment link does
+  not expire. Someone who opened a checkout yesterday, abandoned it, and pays
+  from that old link today will be charged, whatever the shelf looks like
+  now — the availability check happens when the link is made, not when it is
+  paid. Nothing in Square's hosted checkout lets us re-check at payment time.
 
-If a sale goes through for stock that is gone, Square takes the payment and
-staff deal with it as a refund or a backorder — the same as any shop. If that
-is not acceptable, the next step up is Square's inventory adjustment API to
-move stock into a held state at checkout and move it back on expiry, which is
-a real piece of work and needs its own reconciliation. Not built; not claimed.
+For all three, Square takes the payment and staff deal with it as a refund or
+a backorder, the same as any shop. If that is not acceptable, the supported
+way forward is Square's inventory adjustment API: move the stock into a held
+state when the checkout is created and move it back when the hold lapses,
+with a scheduled reconciliation for the ones that fall through. That is a real
+piece of work with its own failure modes, and it is not built here.
 
 Inventory is never adjusted by this code. Square decrements catalog stock
 itself when an order with catalog line items is paid, so touching it here
@@ -349,9 +382,16 @@ and put the exact same notification URL into `WEBHOOK_NOTIFICATION_URL`. The
 signature is an HMAC over that URL plus the body, so one character of
 difference fails every delivery.
 
-The endpoint verifies the signature in constant time, de-duplicates on
-`event_id`, ignores orders this website did not create, and never lets a late
-"pending" event walk a paid order backwards.
+The endpoint verifies the signature in constant time, ignores orders this
+website did not create, and never lets a late "pending" event walk a paid
+order backwards.
+
+On de-duplication, the distinction that matters: an event is skipped only once
+it has been **finished**, not merely seen. A delivery that claimed an event and
+then failed hands the claim straight back and answers 500, so Square's retry
+does the work properly rather than being waved through as a duplicate. A
+delivery abandoned by a killed container is taken over after
+`INFLIGHT_RECOVERY_MS`.
 
 Webhooks are an optimisation, not a dependency: the return page also asks
 Square directly, so order status is correct even before a webhook lands.
@@ -394,6 +434,23 @@ Do all of these in sandbox before touching production.
     cart is still there.
 11. Press Pay twice quickly: one order, not two.
 12. Confirm inventory went down by the right amount in Square, once.
+13. **Stock moved under a shopper.** Put the last unit of something in a cart,
+    then sell that unit in the Square dashboard, then press Pay. You should
+    get the cart back for review and no payment link — not a successful
+    checkout.
+14. **Two shoppers, one unit.** Open the same last item in two browsers and
+    press Pay in both as close together as you can. Exactly one should reach
+    Square; the other should be told it has gone.
+15. **Changed details.** Check out, come back, change only the apartment
+    number, and check out again: two different Square orders. Then retry an
+    unchanged checkout: the same link, no second order.
+16. **Square unreachable.** Temporarily put a wrong token in the sandbox
+    secret and press Pay: you want `AVAILABILITY_UNVERIFIED` and no order.
+    Put the token back.
+17. **Buy Now on something already in the cart.** The saved cart must still
+    have it afterwards.
+18. **A redelivered webhook.** Replay one from the Square dashboard; the order
+    must not change twice and the response must be a 200.
 
 ## Going live
 
@@ -405,6 +462,6 @@ Do all of these in sandbox before touching production.
 ## Costs
 
 Everything is serverless and on-demand. The catalog is cached in DynamoDB and
-in Lambda memory, so a busy day costs a handful of Square API calls rather than
-one per visitor. At this shop's volume expect the AWS bill to be cents a month;
+in Lambda memory, so browsing costs no Square calls at all; only a checkout
+does, and then two or three of them (§8a). At this shop's volume expect the AWS bill to be cents a month;
 the Secrets Manager secret (about $0.40/month each) is the largest fixed line.

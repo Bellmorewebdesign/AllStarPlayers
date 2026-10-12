@@ -25,12 +25,12 @@ import { randomUUID, createHash } from 'node:crypto';
 
 import { loadSecrets, settings, publicConfig, ConfigError } from './lib/config.mjs';
 import { createSquareClient, SquareError } from './lib/square.mjs';
-import { buildCatalogSnapshot } from './lib/catalog.mjs';
+import { buildCatalogSnapshot, verifyVariationsLive, AvailabilityUnverifiedError } from './lib/catalog.mjs';
 import { createStore, sha256, newToken, StoreError } from './lib/store.mjs';
 import { reconcileCart, cartFingerprint } from './lib/cart.mjs';
 import { validateFulfillment } from './lib/fulfillment.mjs';
 import { buildOrder, createPaymentLink, readOrderStatus } from './lib/checkout.mjs';
-import { verifySignature, interpret, shouldApply, SIGNATURE_HEADER } from './lib/webhook.mjs';
+import { verifySignature, interpret, shouldApply, SIGNATURE_HEADER, isTerminal } from './lib/webhook.mjs';
 import {
   methodOf, routePath, rawBody, header, query, reply, parseJsonBody, corsHeaders
 } from './lib/http.mjs';
@@ -152,11 +152,36 @@ async function handleCheckout(event, ctx) {
     }, { allowedOrigins: s.allowedOrigins });
   }
 
-  const snapshot = await getCatalog(square, s, store);
+  /* Only ever a hint for the return page about which cart to tidy up. It is
+     not part of the fingerprint, so buying the same thing from the cart or
+     from Buy Now cannot produce two orders. */
+  const source = body.source === 'buynow' ? 'buynow' : 'cart';
+
+  /* A first pass purely to find out which variations are being asked for.
+     Nothing is authorised on it. */
+  const requested = Array.isArray(body.lines) ? body.lines : [];
+  const ids = [...new Set(requested
+    .map(l => (l && typeof l.variationId === 'string') ? l.variationId.trim() : '')
+    .filter(id => /^[A-Za-z0-9_-]{1,64}$/.test(id)))];
+  if (!ids.length) {
+    return reply(400, event, { success: false, error: 'BAD_CART', message: 'The cart is empty.' },
+      { allowedOrigins: s.allowedOrigins });
+  }
+  if (ids.length > s.maxCartLines) {
+    return reply(400, event, {
+      success: false, error: 'BAD_CART', message: 'That is more than ' + s.maxCartLines + ' different items.'
+    }, { allowedOrigins: s.allowedOrigins });
+  }
+
+  /* THE authorisation read. Straight to Square, every time, for exactly
+     these variations. Never the browsing cache, and never the stale
+     fallback: a cached price or a cached stock level is fine for a shop
+     window and not fine for taking money. */
+  const verified = await verifyVariationsLive(square, ids, s);
 
   /* Holds placed by this same attempt are excluded, so pressing Pay twice
      does not make the customer compete with themselves for the last unit. */
-  const cart = await reconcileCart(body.lines, { snapshot, settings: s, store, attemptId });
+  const cart = await reconcileCart(body.lines, { snapshot: verified, settings: s, store, attemptId });
   if (!cart.ok) {
     return reply(400, event, { success: false, error: cart.error, message: cart.message },
       { allowedOrigins: s.allowedOrigins });
@@ -172,7 +197,7 @@ async function handleCheckout(event, ctx) {
 
   /* Anything changed since the customer last looked gets sent back for them
      to approve. This is a 409, not a failure: the cart in the body is the
-     corrected one. */
+     corrected one, priced from the live read above. */
   if (cart.changed) {
     return reply(409, event, {
       success: false, error: 'CART_CHANGED',
@@ -194,35 +219,77 @@ async function handleCheckout(event, ctx) {
   const fulfillment = fulfillmentResult.fulfillment;
 
   /* The idempotency key is the attempt plus a fingerprint of exactly what is
-     being bought and how it is getting there. A retried request reuses it and
-     gets the same link back; an edited cart produces a different key and a
-     genuinely new order. It lives in DynamoDB, so it survives the container. */
+     being bought and exactly where it is going. A retried request reuses it
+     and gets the same link back; change a quantity, a street, an apartment
+     number or a phone number and it becomes a genuinely new order. It lives
+     in DynamoDB, so it survives the container. */
   const fingerprint = cartFingerprint(cart.payableLines, fulfillment);
   const idemKey = createHash('sha256').update(attemptId + '::' + fingerprint).digest('hex');
 
-  const claim = await store.claimIdempotency(idemKey);
+  /* The token is handed to claimIdempotency so it is written down BEFORE
+     Square is called. If this container dies in between, the retry adopts
+     the same token and re-sends the same Square request. */
+  const claim = await store.claimIdempotency(idemKey, { statusToken: newToken() });
   if (!claim.claimed) {
     const rec = claim.record;
-    if (rec?.status === 'DONE' && rec.result?.checkoutUrl) {
+    if (claim.state === 'done' && rec?.result?.checkoutUrl) {
       return reply(200, event, { success: true, replayed: true, ...rec.result },
         { allowedOrigins: s.allowedOrigins });
     }
-    /* Another request for this exact attempt is mid-flight. Telling the
-       customer to wait a moment is better than opening a second order. */
+    /* Another request for this exact attempt is genuinely mid-flight. */
     return reply(409, event, {
       success: false, error: 'CHECKOUT_IN_PROGRESS',
       message: 'This checkout is already being created. Give it a moment and try again.'
     }, { allowedOrigins: s.allowedOrigins });
   }
+  const statusToken = claim.statusToken;
+  const recovering = claim.state === 'recovered';
 
-  const taxIndex = new Map((snapshot.taxes || []).filter(t => t.enabled).map(t => [t.id, t]));
-  const statusToken = newToken();
+  const taxIndex = new Map((verified.taxes || []).filter(t => t.enabled).map(t => [t.id, t]));
 
+  let heldVariationIds = [];
   try {
+    /* Availability straight from the verified read, so the hold is checked
+       against what Square says right now. Taking the hold and checking the
+       room are one atomic step inside the store, which is what stops two
+       Lambdas both selling the last unit. */
     if (s.holdsEnabled) {
-      await store.placeHolds(attemptId, cart.payableLines.map(l => ({
-        variationId: l.variationId, quantity: l.quantity
-      })), { holdSeconds: s.holdSeconds }).catch(err => console.error('hold_place_failed', err?.message));
+      const availability = new Map();
+      for (const line of cart.payableLines) {
+        /* The raw shelf count, not the hold-adjusted one: acquireHolds
+           subtracts the other live holds itself. */
+        availability.set(line.variationId, line.inventoryState === 'UNKNOWN' ? null : line.onHand);
+      }
+      const acquired = await store.acquireHolds(
+        attemptId,
+        cart.payableLines.map(l => ({ variationId: l.variationId, quantity: l.quantity })),
+        { holdSeconds: s.holdSeconds, availability }
+      );
+      if (!acquired.ok) {
+        /* Somebody else took it between the read and the hold. Send the cart
+           back for review rather than creating an order we cannot fill. */
+        await store.markIdempotencyRecoverable(idemKey);
+        const conflict = acquired.conflict;
+        const line = cart.payableLines.find(l => l.variationId === conflict.variationId);
+        return reply(409, event, {
+          success: false, error: 'CART_CHANGED',
+          message: 'Someone else is buying the last of that. Review your cart and try again.',
+          cart: {
+            ...cart,
+            changed: true,
+            problems: cart.problems.concat([{
+              code: conflict.available > 0 ? 'QUANTITY_REDUCED' : 'OUT_OF_STOCK',
+              variationId: conflict.variationId,
+              productName: line?.productName || null,
+              available: conflict.available,
+              message: conflict.available > 0
+                ? 'Only ' + conflict.available + ' of ' + (line?.productName || 'that item') + ' left.'
+                : (line?.productName || 'That item') + ' has just sold out.'
+            }])
+          }
+        }, { allowedOrigins: s.allowedOrigins });
+      }
+      heldVariationIds = acquired.held;
     }
 
     const referenceId = ('web-' + attemptId).slice(0, 40);
@@ -233,6 +300,8 @@ async function handleCheckout(event, ctx) {
     });
 
     const returnUrl = s.returnUrl + (s.returnUrl.includes('?') ? '&' : '?') + 't=' + encodeURIComponent(statusToken);
+    /* Same key as last time on a recovery, which is the whole point: Square
+       hands back the link it already made rather than making a second one. */
     const link = await createPaymentLink(square, {
       order,
       idempotencyKey: idemKey,
@@ -247,6 +316,7 @@ async function handleCheckout(event, ctx) {
       statusToken,
       environment: cfg.environment,
       fulfillmentType: fulfillment.type,
+      purchaseSource: source,
       /* So the storefront can clear exactly the lines that were bought and
          leave anything else alone. */
       purchasedVariationIds: cart.payableLines.map(l => l.variationId)
@@ -260,8 +330,10 @@ async function handleCheckout(event, ctx) {
         attemptId,
         environment: cfg.environment,
         fulfillmentType: fulfillment.type,
+        purchaseSource: source,
         contactEmail: fulfillment.contact.email,
         createdAt: Date.now(),
+        holdsReleased: false,
         lines: cart.payableLines.map(l => ({
           variationId: l.variationId, productName: l.productName,
           name: l.name, quantity: l.quantity, unitPrice: l.unitPrice
@@ -277,6 +349,7 @@ async function handleCheckout(event, ctx) {
     return reply(200, event, {
       success: true,
       ...record,
+      ...(recovering ? { recovered: true } : {}),
       /* Said plainly, because the next thing that happens is a redirect and
          a redirect proves nothing. */
       paymentConfirmed: false,
@@ -285,12 +358,11 @@ async function handleCheckout(event, ctx) {
     }, { allowedOrigins: s.allowedOrigins });
 
   } catch (err) {
-    /* A failed attempt must not wedge the key, or the customer can never try
-       again with the same cart. */
-    await store.releaseIdempotency(idemKey);
-    if (s.holdsEnabled) {
-      await store.releaseHolds(attemptId, cart.payableLines.map(l => l.variationId));
-    }
+    /* Keep the reservation row — it holds the status token, and Square may
+       already have a link tied to this key — but let the next request take
+       it over immediately instead of being told to wait. */
+    await store.markIdempotencyRecoverable(idemKey);
+    if (heldVariationIds.length) await store.releaseHolds(attemptId, heldVariationIds);
     throw err;
   }
 }
@@ -328,12 +400,16 @@ async function handleOrderStatus(event, ctx) {
     await store.updateOrderStatus(orderId, { status: live.status })
       .catch(err => console.error('order_status_write_failed', err?.message));
   }
+  if (live && stored) await releaseHoldsIfSettled(store, { ...stored, status });
 
   return reply(200, event, {
     success: true,
     verified: Boolean(live),
     status,
     fulfillmentType: stored?.fulfillmentType || null,
+    /* The return page needs this to know whether clearing the saved cart is
+       the right thing to do: a Buy Now purchase must leave it alone. */
+    purchaseSource: stored?.purchaseSource || 'cart',
     pickupPolicy: stored?.fulfillmentType === 'pickup' ? s.pickup.policy : null,
     pickupAddress: stored?.fulfillmentType === 'pickup' ? s.pickup.address : null,
     purchasedVariationIds: (stored?.lines || []).map(l => l.variationId),
@@ -341,6 +417,20 @@ async function handleOrderStatus(event, ctx) {
       createdAt: live.createdAt, totals: live.totals, lines: live.lines, fulfillment: live.fulfillment
     } : null
   }, { allowedOrigins: s.allowedOrigins });
+}
+
+/* Once an order is paid, Square has taken the stock down itself, so a hold on
+   top of that would keep the same unit off the shelf twice. Once it is
+   cancelled, the stock was never going anywhere. Either way the hold goes,
+   and the flag stops it being done twice. */
+async function releaseHoldsIfSettled(store, order) {
+  if (!order || order.holdsReleased) return;
+  if (!isTerminal(order.status)) return;
+  const ids = (order.lines || []).map(l => l.variationId).filter(Boolean);
+  if (!ids.length || !order.attemptId) return;
+  await store.releaseHolds(order.attemptId, ids);
+  await store.updateOrderStatus(order.orderId, { holdsReleased: true })
+    .catch(err => console.error('hold_flag_write_failed', err?.message));
 }
 
 /* -------------------------------------------------------------- webhook */
@@ -380,35 +470,63 @@ async function handleWebhook(event, ctx) {
   }
 
   const eventId = parsed.event_id || parsed.id;
+
+  /* Claiming the id is not the same as finishing with it. A delivery that
+     claimed it and then failed has to be allowed to run again, or the order
+     silently never updates — so only a FINISHED event is skipped. */
+  let claim = 'new';
   if (eventId) {
-    const first = await store.claimWebhookEvent(eventId);
-    /* Square redelivers. A repeat is a success, not a problem: answering 200
-       is what stops it being retried forever. */
-    if (!first) return { statusCode: 200, body: JSON.stringify({ ok: true, duplicate: true }) };
+    claim = await store.beginWebhookEvent(eventId);
+    if (claim === 'done') {
+      return { statusCode: 200, body: JSON.stringify({ ok: true, duplicate: true }) };
+    }
+    if (claim === 'in_progress') {
+      /* Another delivery of this same event is being worked on right now.
+         Acknowledge; whoever holds it will finish. */
+      return { statusCode: 200, body: JSON.stringify({ ok: true, inProgress: true }) };
+    }
   }
 
-  const meaning = interpret(parsed);
-  if (!meaning) return { statusCode: 200, body: JSON.stringify({ ok: true, ignored: true }) };
+  try {
+    const meaning = interpret(parsed);
+    if (!meaning) {
+      if (eventId) await store.completeWebhookEvent(eventId);
+      return { statusCode: 200, body: JSON.stringify({ ok: true, ignored: true }) };
+    }
 
-  const stored = await store.getOrder(meaning.orderId);
-  if (!stored) {
-    /* An order this website did not create — an in-store sale, for instance.
-       Nothing to update and nothing to worry about. */
-    return { statusCode: 200, body: JSON.stringify({ ok: true, unknownOrder: true }) };
+    const stored = await store.getOrder(meaning.orderId);
+    if (!stored) {
+      /* An order this website did not create — an in-store sale, for
+         instance. Nothing to update and nothing to worry about. */
+      if (eventId) await store.completeWebhookEvent(eventId);
+      return { statusCode: 200, body: JSON.stringify({ ok: true, unknownOrder: true }) };
+    }
+
+    if (shouldApply(stored.status, meaning.status)) {
+      await store.updateOrderStatus(meaning.orderId, {
+        status: meaning.status,
+        lastEventId: eventId || null,
+        lastEventSource: meaning.source
+      });
+    }
+
+    /* Inventory is deliberately untouched. Square decrements catalog stock
+       itself when an order with catalog line items is paid, so adjusting it
+       here would take the same units off the shelf twice. The soft hold,
+       though, has done its job and goes back. */
+    await releaseHoldsIfSettled(store, { ...stored, status: meaning.status });
+
+    if (eventId) await store.completeWebhookEvent(eventId);
+    return { statusCode: 200, body: JSON.stringify({ ok: true }) };
+
+  } catch (err) {
+    /* Hand the claim back so Square's retry starts clean, and answer with a
+       failure so there IS a retry. Swallowing this would lose the update. */
+    console.error('webhook_processing_failed', eventId, err?.message);
+    if (eventId) await store.releaseWebhookEvent(eventId);
+    return { statusCode: 500, headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: 'WEBHOOK_PROCESSING_FAILED' }) };
   }
-
-  if (shouldApply(stored.status, meaning.status)) {
-    await store.updateOrderStatus(meaning.orderId, {
-      status: meaning.status,
-      lastEventId: eventId || null,
-      lastEventSource: meaning.source
-    });
-  }
-
-  /* Inventory is deliberately untouched. Square decrements catalog stock
-     itself when an order with catalog line items is paid, so adjusting it
-     here would take the same units off the shelf twice. */
-  return { statusCode: 200, body: JSON.stringify({ ok: true }) };
 }
 
 /* ----------------------------------------------------------------- entry */
@@ -450,6 +568,13 @@ export const handler = async (event) => {
       const pub = err.toPublic();
       return reply(err.status >= 500 ? 502 : err.status, event, {
         success: false, error: 'SQUARE_ERROR', message: pub.message, details: pub.details, requestId
+      }, { allowedOrigins: s.allowedOrigins });
+    }
+    if (err instanceof AvailabilityUnverifiedError) {
+      /* The one case where refusing is the safe answer: we could not ask
+         Square whether this can be sold, so we do not sell it. */
+      return reply(503, event, {
+        success: false, error: 'AVAILABILITY_UNVERIFIED', message: err.message, requestId
       }, { allowedOrigins: s.allowedOrigins });
     }
     if (err instanceof ConfigError || err instanceof StoreError) {

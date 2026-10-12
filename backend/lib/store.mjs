@@ -8,14 +8,18 @@
      IDEM#<hash>    / RECORD               one checkout attempt, and its link
      ORDER#<id>     / RECORD               what we know about an order
      TOKEN#<hash>   / RECORD               a return-page token -> order id
-     EVENT#<id>     / RECORD               a webhook we have already applied
-     HOLD#<varId>   / ATTEMPT#<id>         a soft hold on stock
+     EVENT#<id>     / RECORD               a webhook, and whether it finished
+     HOLD#<varId>   / HOLDS                every live hold on one variation
 
    On soft holds, plainly: a hold is not a reservation. Square has no way to
    reserve catalog stock for a hosted checkout, and the shop sells the same
    rail to whoever is standing in front of it. A hold only stops THIS website
    promising the same last unit to two browsers at once within the hold
    window. It cannot stop an in-store sale, and it is not claimed to.
+
+   All the holds on one variation live in ONE row, which is what makes
+   "is there room, and if so take it" a single atomic compare-and-swap rather
+   than a read followed by a write that another Lambda can slip between.
    ========================================================================== */
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
@@ -55,6 +59,12 @@ export function tokensMatch(a, b) {
   return timingSafeEqual(ba, bb);
 }
 
+/* How long a claimed-but-unfinished piece of work is assumed to still be
+   running. Past this, another request may take it over — which is how a
+   checkout or a webhook recovers from a Lambda that was killed outright. */
+const INFLIGHT_MS = Number.parseInt(process.env.INFLIGHT_RECOVERY_MS || '15000', 10);
+const CAS_ATTEMPTS = 8;
+
 export function createStore({ tableName, client } = {}) {
   if (!tableName) throw new StoreError('TABLE_NAME is not set on the function.');
   const ddb = client || new DynamoDBClient({});
@@ -86,6 +96,23 @@ export function createStore({ tableName, client } = {}) {
     } while (start);
     return out;
   };
+
+  /* DynamoDB is allowed to accept a BatchWriteItem and quietly not do some of
+     it, handing the leftovers back in UnprocessedItems. Ignoring that field
+     loses writes, so every batch is driven to completion or thrown. */
+  async function batchWrite(requests) {
+    let pending = { [tableName]: requests };
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const res = await ddb.send(new BatchWriteItemCommand({ RequestItems: pending }));
+      const left = res.UnprocessedItems || {};
+      const rows = left[tableName] || [];
+      if (!rows.length) return;
+      pending = { [tableName]: rows };
+      await new Promise(r => setTimeout(r, 40 * 2 ** attempt));
+    }
+    throw new StoreError('DynamoDB would not accept ' +
+      (pending[tableName] || []).length + ' writes after six tries.');
+  }
 
   /* ------------------------------------------------------ catalog cache */
 
@@ -123,13 +150,9 @@ export function createStore({ tableName, client } = {}) {
     for (const group of chunkArray(parts.map((data, i) => ({
       pk: 'CATALOG#' + env, sk: 'CHUNK#' + String(i).padStart(4, '0'), data, ttl
     })), 25)) {
-      await ddb.send(new BatchWriteItemCommand({
-        RequestItems: {
-          [tableName]: group.map(item => ({
-            PutRequest: { Item: marshall(item, { removeUndefinedValues: true }) }
-          }))
-        }
-      }));
+      await batchWrite(group.map(item => ({
+        PutRequest: { Item: marshall(item, { removeUndefinedValues: true }) }
+      })));
     }
     /* The manifest goes last on purpose. Until it lands, a reader sees the
        previous manifest and the previous chunk count, so it never stitches
@@ -162,20 +185,42 @@ export function createStore({ tableName, client } = {}) {
      Everybody else — a retried fetch, a double-tapped button, a flaky phone
      network — gets the same answer back instead of a second order.
 
-     `claim` is a conditional insert, so the race is settled by DynamoDB
-     rather than by hope. */
-  async function claimIdempotency(key, { ttlSeconds = 172800 } = {}) {
+     The status token is written here, BEFORE Square is called, so that a
+     container killed between "Square made the link" and "we wrote it down"
+     can be recovered: the retry adopts the same token and re-sends the same
+     Square request, and Square's own idempotency returns the same link. */
+  async function claimIdempotency(key, { statusToken, ttlSeconds = 172800 } = {}) {
     const pk = 'IDEM#' + key;
     try {
       await ddb.send(new PutItemCommand({
         TableName: tableName,
-        Item: marshall({ pk, sk: 'RECORD', status: 'PENDING', createdAt: Date.now(), ttl: nowSec() + ttlSeconds }),
+        Item: marshall({
+          pk, sk: 'RECORD', status: 'PENDING', statusToken,
+          createdAt: Date.now(), ttl: nowSec() + ttlSeconds
+        }, { removeUndefinedValues: true }),
         ConditionExpression: 'attribute_not_exists(pk)'
       }));
-      return { claimed: true, record: null };
+      return { claimed: true, record: null, statusToken };
     } catch (err) {
       if (err?.name !== 'ConditionalCheckFailedException') throw err;
-      return { claimed: false, record: await get(pk, 'RECORD') };
+      const record = await get(pk, 'RECORD');
+      if (!record) return { claimed: false, record: null };
+
+      if (record.status === 'DONE') return { claimed: false, record, state: 'done' };
+
+      /* A PENDING row older than the in-flight window belonged to a request
+         that is not coming back. Take it over, keeping its token. */
+      const age = Date.now() - Number(record.createdAt || 0);
+      if (age > INFLIGHT_MS) {
+        await ddb.send(new UpdateItemCommand({
+          TableName: tableName,
+          Key: marshall({ pk, sk: 'RECORD' }),
+          UpdateExpression: 'SET createdAt = :now',
+          ExpressionAttributeValues: marshall({ ':now': Date.now() })
+        })).catch(() => {});
+        return { claimed: true, record, state: 'recovered', statusToken: record.statusToken || statusToken };
+      }
+      return { claimed: false, record, state: 'in_progress' };
     }
   }
 
@@ -192,11 +237,18 @@ export function createStore({ tableName, client } = {}) {
     }));
   }
 
-  /* A failed attempt must not wedge the key forever: drop it so the customer
-     can press the button again. */
-  async function releaseIdempotency(key) {
-    await ddb.send(new DeleteItemCommand({ TableName: tableName, Key: marshall({ pk: 'IDEM#' + key, sk: 'RECORD' }) }))
-      .catch(err => console.error('idem_release_failed', err?.message));
+  /* A failed attempt must not wedge the key. The row is kept — it still holds
+     the status token, which the Square link out there may already be tied to —
+     but its age is reset so the very next request takes it over instead of
+     being told to wait. */
+  async function markIdempotencyRecoverable(key) {
+    await ddb.send(new UpdateItemCommand({
+      TableName: tableName,
+      Key: marshall({ pk: 'IDEM#' + key, sk: 'RECORD' }),
+      UpdateExpression: 'SET createdAt = :zero',
+      ExpressionAttributeValues: marshall({ ':zero': 0 }),
+      ConditionExpression: 'attribute_exists(pk)'
+    })).catch(err => console.error('idem_recoverable_failed', err?.message));
   }
 
   /* -------------------------------------------------------------- orders */
@@ -231,70 +283,183 @@ export function createStore({ tableName, client } = {}) {
 
   /* ------------------------------------------------------------ webhooks */
 
-  /* Square can deliver the same event more than once, and says so. The first
-     delivery writes the row; the rest see the condition fail and stop. */
-  async function claimWebhookEvent(eventId, { ttlSeconds = 604800 } = {}) {
+  /* Square delivers the same event more than once, and says so. But "we have
+     seen this id" is not the same as "we have finished with it": a delivery
+     that claimed the id and then failed must be allowed to run again, or the
+     order silently never updates.
+
+     So the row carries a state. Only DONE means "skip me". */
+  async function beginWebhookEvent(eventId, { ttlSeconds = 604800 } = {}) {
+    const pk = 'EVENT#' + eventId;
     try {
       await ddb.send(new PutItemCommand({
         TableName: tableName,
-        Item: marshall({ pk: 'EVENT#' + eventId, sk: 'RECORD', seenAt: Date.now(), ttl: nowSec() + ttlSeconds }),
+        Item: marshall({ pk, sk: 'RECORD', status: 'PENDING', startedAt: Date.now(), ttl: nowSec() + ttlSeconds }),
         ConditionExpression: 'attribute_not_exists(pk)'
       }));
-      return true;
+      return 'new';
     } catch (err) {
-      if (err?.name === 'ConditionalCheckFailedException') return false;
-      throw err;
+      if (err?.name !== 'ConditionalCheckFailedException') throw err;
+      const row = await get(pk, 'RECORD');
+      if (!row) return 'new';
+      if (row.status === 'DONE') return 'done';
+      /* Fresh PENDING: another delivery is working on it right now. Older
+         than the window: whoever had it is gone, so take it over. */
+      if (Date.now() - Number(row.startedAt || 0) < INFLIGHT_MS) return 'in_progress';
+      await ddb.send(new UpdateItemCommand({
+        TableName: tableName,
+        Key: marshall({ pk, sk: 'RECORD' }),
+        UpdateExpression: 'SET startedAt = :now',
+        ExpressionAttributeValues: marshall({ ':now': Date.now() })
+      })).catch(() => {});
+      return 'new';
     }
+  }
+
+  async function completeWebhookEvent(eventId, { ttlSeconds = 604800 } = {}) {
+    await ddb.send(new UpdateItemCommand({
+      TableName: tableName,
+      Key: marshall({ pk: 'EVENT#' + eventId, sk: 'RECORD' }),
+      UpdateExpression: 'SET #s = :done, finishedAt = :now, #t = :t',
+      ExpressionAttributeNames: { '#s': 'status', '#t': 'ttl' },
+      ExpressionAttributeValues: marshall({ ':done': 'DONE', ':now': Date.now(), ':t': nowSec() + ttlSeconds })
+    }));
+  }
+
+  /* Processing blew up. Drop the claim so Square's retry starts clean. */
+  async function releaseWebhookEvent(eventId) {
+    await ddb.send(new DeleteItemCommand({
+      TableName: tableName, Key: marshall({ pk: 'EVENT#' + eventId, sk: 'RECORD' })
+    })).catch(err => console.error('event_release_failed', err?.message));
   }
 
   /* --------------------------------------------------------- soft holds */
 
-  async function heldQuantity(variationId, { excludeAttempt } = {}) {
-    const rows = await queryPk('HOLD#' + variationId);
-    const cutoff = nowSec();
-    return rows
-      .filter(r => String(r.sk).startsWith('ATTEMPT#'))
-      .filter(r => (r.ttl ?? 0) > cutoff)              /* TTL deletion lags */
-      .filter(r => !excludeAttempt || r.sk !== 'ATTEMPT#' + excludeAttempt)
-      .reduce((n, r) => n + (Number(r.qty) || 0), 0);
+  /* Every live hold on one variation sits in a single row:
+
+       { pk: "HOLD#<variationId>", sk: "HOLDS", version: 7,
+         entries: [ { attemptId, qty, expiresAt } , ... ] }
+
+     Keeping them together is the whole point. "Is there room for me, and if
+     so take it" becomes one conditional write against `version`, so two
+     Lambdas racing for the last unit cannot both read 'one available' and
+     both write a hold. The loser's condition fails, it re-reads, and it sees
+     the winner's entry.
+
+     Expiry is handled on the way past: every read drops entries whose
+     expiresAt has gone by, so a lapsed hold stops counting without anything
+     having to sweep up after it. */
+
+  function liveEntries(row, { excludeAttempt } = {}) {
+    const now = nowSec();
+    const all = Array.isArray(row?.entries) ? row.entries : [];
+    return all.filter(e => e && Number(e.expiresAt) > now &&
+      (!excludeAttempt || e.attemptId !== excludeAttempt));
   }
 
-  async function placeHolds(attemptId, lines, { holdSeconds = 900 } = {}) {
-    const ttl = nowSec() + holdSeconds;
-    for (const group of chunkArray(lines, 25)) {
-      await ddb.send(new BatchWriteItemCommand({
-        RequestItems: {
-          [tableName]: group.map(l => ({
-            PutRequest: {
-              Item: marshall({
-                pk: 'HOLD#' + l.variationId, sk: 'ATTEMPT#' + attemptId,
-                qty: l.quantity, placedAt: Date.now(), ttl
-              })
-            }
-          }))
+  async function heldQuantity(variationId, { excludeAttempt } = {}) {
+    const row = await get('HOLD#' + variationId, 'HOLDS');
+    return liveEntries(row, { excludeAttempt }).reduce((n, e) => n + (Number(e.qty) || 0), 0);
+  }
+
+  async function writeHolds(variationId, row, entries) {
+    const version = Number(row?.version || 0) + 1;
+    const maxExpiry = entries.reduce((m, e) => Math.max(m, Number(e.expiresAt) || 0), nowSec());
+    const item = {
+      pk: 'HOLD#' + variationId, sk: 'HOLDS',
+      version, entries, updatedAt: Date.now(),
+      /* The row itself lingers a little past its last hold, then goes. */
+      ttl: maxExpiry + 3600
+    };
+    await ddb.send(new PutItemCommand({
+      TableName: tableName,
+      Item: marshall(item, { removeUndefinedValues: true }),
+      ...(row
+        ? {
+            ConditionExpression: '#v = :v',
+            ExpressionAttributeNames: { '#v': 'version' },
+            ExpressionAttributeValues: marshall({ ':v': Number(row.version || 0) })
+          }
+        : { ConditionExpression: 'attribute_not_exists(pk)' })
+    }));
+  }
+
+  /* Take `qty` of one variation, or report that there is not room.
+     `available` is null when stock is not counted, which means no ceiling to
+     enforce here — the catalog has already decided whether such a variation
+     may be sold at all. */
+  async function acquireOne(attemptId, variationId, qty, available, holdSeconds) {
+    for (let attempt = 0; attempt < CAS_ATTEMPTS; attempt++) {
+      const row = await get('HOLD#' + variationId, 'HOLDS');
+      const others = liveEntries(row, { excludeAttempt: attemptId });
+      const held = others.reduce((n, e) => n + (Number(e.qty) || 0), 0);
+
+      if (available !== null && available !== undefined && held + qty > available) {
+        return { ok: false, variationId, available: Math.max(0, available - held) };
+      }
+      const entries = others.concat([{ attemptId, qty, expiresAt: nowSec() + holdSeconds }]);
+      try {
+        await writeHolds(variationId, row, entries);
+        return { ok: true, variationId };
+      } catch (err) {
+        /* Somebody else wrote first. Read again and see where that leaves us. */
+        if (err?.name === 'ConditionalCheckFailedException') continue;
+        throw err;
+      }
+    }
+    throw new StoreError('Could not settle a stock hold on ' + variationId + ' after ' + CAS_ATTEMPTS + ' tries.');
+  }
+
+  /* All or nothing across the cart: a line that cannot be held rolls back the
+     ones already taken, so a customer is never half-reserved. */
+  async function acquireHolds(attemptId, lines, { holdSeconds = 900, availability = new Map() } = {}) {
+    const taken = [];
+    try {
+      for (const line of lines) {
+        const available = availability.has(line.variationId) ? availability.get(line.variationId) : null;
+        const result = await acquireOne(attemptId, line.variationId, line.quantity, available, holdSeconds);
+        if (!result.ok) {
+          await releaseHolds(attemptId, taken);
+          return { ok: false, conflict: result };
         }
-      }));
+        taken.push(line.variationId);
+      }
+      return { ok: true, held: taken };
+    } catch (err) {
+      await releaseHolds(attemptId, taken);
+      throw err;
     }
   }
 
+  async function releaseOne(attemptId, variationId) {
+    for (let attempt = 0; attempt < CAS_ATTEMPTS; attempt++) {
+      const row = await get('HOLD#' + variationId, 'HOLDS');
+      if (!row) return;
+      const entries = liveEntries(row, { excludeAttempt: attemptId });
+      if (entries.length === (Array.isArray(row.entries) ? row.entries.length : 0)) return;  /* nothing of ours */
+      try {
+        await writeHolds(variationId, row, entries);
+        return;
+      } catch (err) {
+        if (err?.name === 'ConditionalCheckFailedException') continue;
+        throw err;
+      }
+    }
+    console.error('hold_release_gave_up', variationId, attemptId);
+  }
+
   async function releaseHolds(attemptId, variationIds) {
-    for (const group of chunkArray(variationIds, 25)) {
-      await ddb.send(new BatchWriteItemCommand({
-        RequestItems: {
-          [tableName]: group.map(id => ({
-            DeleteRequest: { Key: marshall({ pk: 'HOLD#' + id, sk: 'ATTEMPT#' + attemptId }) }
-          }))
-        }
-      })).catch(err => console.error('hold_release_failed', err?.message));
+    for (const id of variationIds || []) {
+      await releaseOne(attemptId, id).catch(err => console.error('hold_release_failed', err?.message));
     }
   }
 
   return {
     readCatalog, readCatalogStale, writeCatalog,
-    claimIdempotency, completeIdempotency, releaseIdempotency,
+    claimIdempotency, completeIdempotency, markIdempotencyRecoverable,
     saveOrder, getOrder, getOrderIdForToken, updateOrderStatus,
-    claimWebhookEvent,
-    heldQuantity, placeHolds, releaseHolds
+    beginWebhookEvent, completeWebhookEvent, releaseWebhookEvent,
+    heldQuantity, acquireHolds, releaseHolds
   };
 }
 

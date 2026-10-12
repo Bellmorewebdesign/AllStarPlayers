@@ -372,6 +372,11 @@
     }
     return {
       attemptId: ASP.cart.attemptId(),
+      /* Tells the return page which cart to tidy up afterwards. It is only a
+         hint: a Buy Now of something that is also in the saved cart must not
+         empty that line. It deliberately plays no part in the idempotency
+         key, so buying the same thing both ways cannot double up. */
+      source: buyNowMode ? 'buynow' : 'cart',
       /* Ids and quantities only. The server prices it. */
       lines: state.cart.payableLines.map(function (l) {
         return { variationId: l.variationId, quantity: l.quantity };
@@ -441,6 +446,13 @@
         return;
       }
       if (err.code === 'CHECKOUT_IN_PROGRESS') {
+        els.payMsg.textContent = err.message;
+        els.payMsg.className = 'pay-msg pay-msg--warn';
+        return;
+      }
+      if (err.code === 'AVAILABILITY_UNVERIFIED') {
+        /* The shop could not confirm stock with Square, so it refused rather
+           than guessing. Nothing was charged. */
         els.payMsg.textContent = err.message;
         els.payMsg.className = 'pay-msg pay-msg--warn';
         return;

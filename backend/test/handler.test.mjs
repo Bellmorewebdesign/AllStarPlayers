@@ -16,7 +16,7 @@ const NOTIFICATION_URL = 'https://n9ecaydkv4.execute-api.us-east-1.amazonaws.com
 
 /* The handler builds its own clients, so the modules it imports are patched
    before it is loaded. Each test gets a fresh module graph. */
-async function bootstrap({ env = {}, squareOverrides = {}, secrets } = {}) {
+async function bootstrap({ env = {}, squareOverrides = {}, secrets, ddb: sharedDdb } = {}) {
   for (const [k, v] of Object.entries({ ...baseEnv(), WEBHOOK_NOTIFICATION_URL: NOTIFICATION_URL, ...env })) {
     if (v === null) delete process.env[k]; else process.env[k] = v;
   }
@@ -26,7 +26,7 @@ async function bootstrap({ env = {}, squareOverrides = {}, secrets } = {}) {
   const square = await import('../lib/square.mjs' + stamp);
   const store = await import('../lib/store.mjs' + stamp);
 
-  const ddb = fakeDynamo();
+  const ddb = sharedDdb || fakeDynamo();
   const fetchImpl = fakeSquareFetch(squareHandlers(squareOverrides));
 
   config.resetSecretCache();
