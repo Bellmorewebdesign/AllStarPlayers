@@ -182,7 +182,6 @@ Commas inside the JSON need escaping on the CLI; the console is easier for
 | `CLEANUP_MAX_ATTEMPTS` | 12 | tries at cancelling one link before it is flagged for a person |
 | `CLEANUP_BATCH_SIZE` | 25 | jobs per sweep run |
 | `CLEANUP_FORCE_CANCEL_ORDER` | `false` | fallback that cancels the order directly if deleting the link does not — **unverified, see §9b** |
-| `HOLD_BACKSTOP_SECONDS` | 604800 | absolute last resort: a hold nothing ever settled is dropped after this, loudly |
 | `ORDER_RETENTION_DAYS` | 90 | how long order rows live |
 | `MAX_CART_LINES` / `MAX_LINE_QUANTITY` | 40 / 20 | ceilings |
 
@@ -246,7 +245,8 @@ INT=$(aws apigatewayv2 create-integration --api-id $API --region us-east-1 \
 
 for ROUTE in "GET /config" "GET /catalog" "POST /catalog/refresh" \
              "POST /cart/validate" "POST /checkout" "GET /order" \
-             "POST /webhooks/square" "POST /admin/sweep"; do
+             "POST /webhooks/square" "POST /admin/sweep" \
+             "GET /admin/stuck" "POST /admin/holds/release"; do
   aws apigatewayv2 create-route --api-id $API --region us-east-1 \
     --route-key "$ROUTE" --target "integrations/$INT"
 done
@@ -405,10 +405,8 @@ customer paying hours later. Trusting the delete would put the hole straight
 back, so the delete is treated as a request and the re-read as the answer.
 
 A job that will not settle is retried on a backoff and then flagged
-`stuck: true` in the table with a `cleanup_stuck_needs_a_person` log line. Its
-stock stays held, deliberately: a live payment link nobody can cancel is worse
-than a unit off the website. `HOLD_BACKSTOP_SECONDS` is the last resort and
-logs loudly when it fires.
+`stuck: true` with a `cleanup_stuck_needs_a_person` log line. **Its stock stays
+held, and there is no timer that will ever let go of it.** See §9c.
 
 ### Wiring the schedule
 
@@ -466,6 +464,58 @@ If 2–4 do not behave — the forum reports say they sometimes do not — then 
 is **off by default and unverified**; the re-read still decides, so turning it
 on cannot cause a bad release either way. If neither works, the stock stays
 held and the job is flagged, which is the safe failure.
+
+## 9c. Stock is never freed on a timer — and what that means for you
+
+There is **no maximum age at which a hold gives up**. Not seven days, not
+seven months. There is no environment variable that re-arms one, the hold row
+carries no DynamoDB TTL while it holds anything, and the cleanup job that
+tracks it carries no TTL at all.
+
+The reasoning is short: age is not evidence. A Square payment link that nobody
+has managed to cancel is still payable on its thousandth day. Dropping the
+hold would put a unit back on the website that the link can still buy, which
+is the exact thing this whole mechanism exists to prevent. An automatic
+release would also be *silent* — no log, no order, no way to find out
+afterwards why the shop oversold.
+
+So the failure mode is deliberately the visible one: a unit sits off the
+website until a person deals with it.
+
+**Finding them.** Either the `cleanup_stuck_needs_a_person` log line, or:
+
+```bash
+curl -s -H "x-admin-key: $ADMIN_REFRESH_KEY" \
+  https://$API.execute-api.us-east-1.amazonaws.com/default/admin/stuck | python3 -m json.tool
+```
+
+Each entry names the attempt, the order, the payment link, the variations
+being held, how many times cleanup has tried, and the last error.
+
+**Resolving one.** Open that order in the Square dashboard and look.
+
+- If it is *paid*, there is nothing to do: the next sweep will see that and
+  free the hold by itself.
+- If it is *cancelled*, likewise.
+- If it is still live, try to delete the link from the Square dashboard by
+  hand, then run `POST /admin/sweep`.
+- Only when you have looked and are satisfied the order can never be paid:
+
+```bash
+curl -s -X POST -H "x-admin-key: $ADMIN_REFRESH_KEY" \
+  -H 'content-type: application/json' \
+  -d '{"attemptId":"<from the stuck listing>","confirm":"I-CHECKED-SQUARE"}' \
+  https://$API.execute-api.us-east-1.amazonaws.com/default/admin/holds/release
+```
+
+That is the only route in the whole service that frees stock without Square
+having confirmed anything, which is why it needs the key, the exact
+confirmation phrase, and why it writes a `hold_released_by_hand` line naming
+the order and the link. It is an audit trail, not a convenience.
+
+**Set up an alarm before launch.** A CloudWatch metric filter on
+`cleanup_stuck_needs_a_person` is the difference between noticing this the day
+it happens and noticing it when a customer asks why a size is missing.
 
 ## 10. Webhooks
 
@@ -560,6 +610,16 @@ Do all of these in sandbox before touching production.
     check out again from the cart: a new link, which does work.
 22. **The schedule.** Confirm the EventBridge rule is firing and
     `cleanup_sweep` appears in CloudWatch every five minutes.
+23. **A hold that cannot be settled.** Create a checkout, delete its payment
+    link by hand in the Square dashboard *without* cancelling the order if you
+    can, or set a deliberately wrong token so cleanup keeps failing. Run the
+    sweep until the job is flagged, then confirm with `GET /admin/stuck` that
+    it is listed and that **the item is still unavailable on the website**.
+    Freeing it on its own would be the bug.
+24. **Resolving one by hand.** From that same stuck job, run
+    `POST /admin/holds/release` without `confirm` (it must refuse), then with
+    it (the stock comes back), and check the `hold_released_by_hand` line is
+    in CloudWatch.
 
 ## Going live
 

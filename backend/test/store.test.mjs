@@ -165,18 +165,22 @@ test('holds add up, exclude their own attempt and expire', async () => {
   assert.equal(await store.heldQuantity('V1'), 0);
 });
 
-test('the backstop eventually drops a hold nothing ever settled', async () => {
+test('nothing ever settled is nothing ever released', async () => {
   const { d, store } = mk();
   await store.acquireHolds('forgotten', [{ variationId: 'VB', quantity: 1 }],
     { availability: new Map([['VB', 5]]) });
   assert.equal(await store.heldQuantity('VB'), 1);
 
-  /* Far enough past the backstop that holding the unit forever is the worse
-     of the two problems. */
+  /* Eight days on, with no confirmation from Square either way. The payment
+     link behind this is still payable, so the unit is still spoken for. */
   d.find('HOLD#VB')[0].entries.forEach(e => {
     e.expiresAt = Math.floor(Date.now() / 1000) - (8 * 86400);
   });
-  assert.equal(await store.heldQuantity('VB'), 0);
+  assert.equal(await store.heldQuantity('VB'), 1,
+    'there is no age at which releasing unverified stock becomes safe');
+
+  /* And DynamoDB must not do it for us behind our backs. */
+  assert.equal(d.find('HOLD#VB')[0].ttl, undefined);
 });
 
 test('a hold is refused when there is no room, and takes nothing', async () => {

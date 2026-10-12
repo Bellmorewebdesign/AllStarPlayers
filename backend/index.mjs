@@ -12,6 +12,8 @@
      GET  /order             what Square says about an order, by status token
      POST /webhooks/square   signed Square notifications
      POST /admin/sweep       run the abandoned-checkout cleanup by hand
+     GET  /admin/stuck       holds cleanup could not settle, awaiting a person
+     POST /admin/holds/release   free one of those, after a human has checked
 
    It is also invoked off an HTTP request entirely: EventBridge sends
    { task: 'sweep-abandoned-checkouts' } on a schedule to cancel abandoned
@@ -264,6 +266,9 @@ async function handleCheckout(event, ctx) {
   const taxIndex = new Map((verified.taxes || []).filter(t => t.enabled).map(t => [t.id, t]));
 
   let heldVariationIds = [];
+  /* Set the moment Square answers. After that point the link is out there and
+     payable, so the error paths below must NOT hand the stock back. */
+  let liveLink = null;
   try {
     /* Availability straight from the verified read, so the hold is checked
        against what Square says right now. Taking the hold and checking the
@@ -324,6 +329,7 @@ async function handleCheckout(event, ctx) {
       returnUrl,
       description: s.storeName + ' online order'
     });
+    liveLink = link;
 
     const record = {
       checkoutUrl: link.checkoutUrl,
@@ -394,7 +400,31 @@ async function handleCheckout(event, ctx) {
        already have a link tied to this key — but let the next request take
        it over immediately instead of being told to wait. */
     await store.markIdempotencyRecoverable(idemKey);
-    if (heldVariationIds.length) await store.releaseHolds(attemptId, heldVariationIds);
+
+    if (heldVariationIds.length) {
+      if (liveLink) {
+        /* Square made a link before this went wrong. It is payable right now,
+           whatever happened to us afterwards, so the stock stays held and
+           cleanup is told to go and settle it like any other abandoned
+           checkout. Handing the unit back here would oversell it. */
+        console.error('checkout_failed_after_link', JSON.stringify({
+          attemptId, orderId: liveLink.orderId, paymentLinkId: liveLink.paymentLinkId
+        }));
+        await store.enqueueSweep({
+          attemptId,
+          dueAt: Math.floor(Date.now() / 1000) + s.cleanupGraceSeconds,
+          orderId: liveLink.orderId,
+          paymentLinkId: liveLink.paymentLinkId,
+          idemKey,
+          variationIds: heldVariationIds,
+          createdAt: Date.now(),
+          note: 'checkout failed after the link was created'
+        }).catch(e => console.error('sweep_enqueue_failed', attemptId, e?.message));
+      } else {
+        /* Nothing was ever created, so nothing can buy it. */
+        await store.releaseHolds(attemptId, heldVariationIds);
+      }
+    }
     throw err;
   }
 }
@@ -563,18 +593,96 @@ async function handleWebhook(event, ctx) {
 
 /* ------------------------------------------------------------- cleanup */
 
-/* Normally driven by EventBridge on a schedule. This route is for running it
-   by hand while setting the shop up, and for the sandbox checks. */
-async function handleSweepRoute(event, ctx) {
-  const { cfg, s, square, store } = ctx;
+function adminRejection(event, cfg, s) {
   if (!cfg.adminKey) {
-    return reply(404, event, { success: false, error: 'NOT_FOUND', message: 'Sweep is switched off.' },
+    return reply(404, event, { success: false, error: 'NOT_FOUND', message: 'Not available.' },
       { allowedOrigins: s.allowedOrigins });
   }
   if (sha256(header(event, 'x-admin-key') || '') !== sha256(cfg.adminKey)) {
     return reply(403, event, { success: false, error: 'FORBIDDEN', message: 'Wrong admin key.' },
       { allowedOrigins: s.allowedOrigins });
   }
+  return null;
+}
+
+/* What cleanup has given up on. Each row here is stock sitting off the
+   website because a payment link could not be confirmed dead. Somebody has to
+   open the order in Square and decide. */
+async function handleStuckRoute(event, ctx) {
+  const { cfg, s, store } = ctx;
+  const refused = adminRejection(event, cfg, s);
+  if (refused) return refused;
+
+  const stuck = await store.stuckSweeps();
+  return reply(200, event, {
+    success: true,
+    count: stuck.length,
+    stuck: stuck.map(j => ({
+      attemptId: j.attemptId, orderId: j.orderId, paymentLinkId: j.paymentLinkId,
+      variationIds: j.variationIds || [], attempts: j.attempts || 0,
+      lastError: j.lastError || null, stuckSince: j.stuckSince || null,
+      createdAt: j.createdAt || null
+    }))
+  }, { allowedOrigins: s.allowedOrigins });
+}
+
+/* The one place stock is freed without Square having said so — and only
+   because a person has looked at the order in the Square dashboard and is
+   saying so on the record. The confirmation phrase is there to make that a
+   decision rather than a slip. */
+async function handleManualReleaseRoute(event, ctx) {
+  const { cfg, s, store } = ctx;
+  const refused = adminRejection(event, cfg, s);
+  if (refused) return refused;
+
+  const { body, error } = parseJsonBody(event);
+  if (error) return reply(400, event, { success: false, error: 'BAD_JSON', message: error },
+    { allowedOrigins: s.allowedOrigins });
+
+  const attemptId = typeof body.attemptId === 'string' ? body.attemptId.trim() : '';
+  if (!attemptId) {
+    return reply(400, event, { success: false, error: 'BAD_REQUEST', message: 'Send an attemptId.' },
+      { allowedOrigins: s.allowedOrigins });
+  }
+  if (body.confirm !== 'I-CHECKED-SQUARE') {
+    return reply(400, event, {
+      success: false, error: 'CONFIRMATION_REQUIRED',
+      message: 'Open the order in Square first. If it really is dead, send ' +
+               'confirm: "I-CHECKED-SQUARE" to free the stock.'
+    }, { allowedOrigins: s.allowedOrigins });
+  }
+
+  const job = await store.sweepForAttempt(attemptId);
+  if (!job) {
+    return reply(404, event, { success: false, error: 'NOT_FOUND', message: 'No cleanup job for that attempt.' },
+      { allowedOrigins: s.allowedOrigins });
+  }
+
+  /* Logged loudly: this is the audit trail for a unit that went back on the
+     website on a human's word rather than Square's. */
+  console.error('hold_released_by_hand', JSON.stringify({
+    attemptId, orderId: job.orderId, paymentLinkId: job.paymentLinkId,
+    variationIds: job.variationIds || [], attempts: job.attempts || 0
+  }));
+
+  await store.releaseHolds(attemptId, job.variationIds || []);
+  if (job.orderId) {
+    await store.updateOrderStatus(job.orderId, { holdsReleased: true, cleanupOutcome: 'released_by_hand' })
+      .catch(err => console.error('manual_release_flag_failed', err?.message));
+  }
+  await store.deleteSweep(job);
+
+  return reply(200, event, {
+    success: true, released: job.variationIds || [], orderId: job.orderId || null
+  }, { allowedOrigins: s.allowedOrigins });
+}
+
+/* Normally driven by EventBridge on a schedule. This route is for running it
+   by hand while setting the shop up, and for the sandbox checks. */
+async function handleSweepRoute(event, ctx) {
+  const { cfg, s, square, store } = ctx;
+  const refused = adminRejection(event, cfg, s);
+  if (refused) return refused;
   const tally = await sweepAbandonedCheckouts({ square, store, settings: s });
   return reply(200, event, { success: true, swept: tally }, { allowedOrigins: s.allowedOrigins });
 }
@@ -586,6 +694,8 @@ const ROUTES = [
   ['GET',  '/catalog',         handleCatalog],
   ['POST', '/catalog/refresh', handleRefresh],
   ['POST', '/admin/sweep',     handleSweepRoute],
+  ['GET',  '/admin/stuck',     handleStuckRoute],
+  ['POST', '/admin/holds/release', handleManualReleaseRoute],
   ['POST', '/cart/validate',   handleCartValidate],
   ['POST', '/checkout',        handleCheckout],
   ['GET',  '/order',           handleOrderStatus],

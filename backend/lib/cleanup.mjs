@@ -217,7 +217,11 @@ export async function sweepAbandonedCheckouts({ square, store, settings, limit }
           }));
           await store.rescheduleSweep(job, {
             dueAt: nextDue(RETRY_SCHEDULE.length - 1),
-            patch: { attempts, stuck: true, lastError: result.error || 'order still live' }
+            patch: {
+              attempts, stuck: true,
+              stuckSince: job.stuckSince || Date.now(),
+              lastError: result.error || 'order still live'
+            }
           });
         } else {
           if (result.outcome === OUTCOME.STILL_LIVE) tally.stillLive++; else tally.retried++;

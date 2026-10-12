@@ -74,11 +74,17 @@ export function tokensMatch(a, b) {
 const INFLIGHT_MS = Number.parseInt(process.env.INFLIGHT_RECOVERY_MS || '15000', 10);
 const CAS_ATTEMPTS = 8;
 
-/* The last line of defence. If cleanup has not managed to settle a hold in
-   this long, something is badly wrong — but holding a unit off the shelf
-   forever is its own kind of broken, so the entry is dropped and the fact is
-   logged loudly for somebody to look at. */
-const HOLD_BACKSTOP_SECONDS = Number.parseInt(process.env.HOLD_BACKSTOP_SECONDS || String(7 * 86400), 10);
+/* There is deliberately no maximum age at which a hold gives up and frees its
+   stock. Age is not evidence. A Square payment link that nobody has managed
+   to cancel is still payable on its thousandth day, so dropping the hold
+   would sell a unit that link can still buy — which is the whole thing this
+   design exists to prevent.
+
+   A hold that cannot be settled is flagged (see stuckSweeps) and waits for a
+   person. That is a worse shopping experience and a correct one. */
+
+/* Once a hold row is empty it is just litter, so it may be tidied away. */
+const EMPTY_HOLD_TTL_SECONDS = 86400;
 
 export function createStore({ tableName, client } = {}) {
   if (!tableName) throw new StoreError('TABLE_NAME is not set on the function.');
@@ -397,23 +403,17 @@ export function createStore({ tableName, client } = {}) {
      expiresAt has gone by, so a lapsed hold stops counting without anything
      having to sweep up after it. */
 
-  /* Everything still holding stock. Note what is NOT a reason to drop an
-     entry: its expiresAt having passed. That only means we have stopped
-     waiting for the customer, not that their payment link has stopped
-     working. Cleanup removes the entry once it has proof either way. */
+  /* Everything still holding stock — which is everything, until something
+     takes it out explicitly.
+
+     expiresAt is a schedule, not an expiry. It says when cleanup should go
+     looking; it does not say the customer's payment link has stopped working,
+     because it has not. The only ways an entry leaves this list are
+     releaseHolds, called by cleanup once Square has confirmed the order is
+     paid or cancelled, and the deliberate manual release. */
   function liveEntries(row, { excludeAttempt } = {}) {
-    const now = nowSec();
     const all = Array.isArray(row?.entries) ? row.entries : [];
-    return all.filter(e => {
-      if (!e) return false;
-      if (Number(e.expiresAt) + HOLD_BACKSTOP_SECONDS <= now) {
-        console.error('hold_backstop_dropped', JSON.stringify({
-          attemptId: e.attemptId, qty: e.qty, expiresAt: e.expiresAt
-        }));
-        return false;
-      }
-      return !excludeAttempt || e.attemptId !== excludeAttempt;
-    });
+    return all.filter(e => e && (!excludeAttempt || e.attemptId !== excludeAttempt));
   }
 
   async function heldQuantity(variationId, { excludeAttempt } = {}) {
@@ -423,15 +423,13 @@ export function createStore({ tableName, client } = {}) {
 
   async function writeHolds(variationId, row, entries) {
     const version = Number(row?.version || 0) + 1;
-    /* The row has to outlive its entries by the backstop, or DynamoDB would
-       delete the evidence before cleanup had finished with it. */
-    const maxExpiry = entries.reduce((m, e) => Math.max(m, Number(e.expiresAt) || 0), nowSec())
-      + HOLD_BACKSTOP_SECONDS;
     const item = {
       pk: 'HOLD#' + variationId, sk: 'HOLDS',
       version, entries, updatedAt: Date.now(),
-      /* The row itself lingers a little past its last hold, then goes. */
-      ttl: maxExpiry + 3600
+      /* No TTL while anything is held. A TTL here would be DynamoDB quietly
+         doing the thing this design refuses to do: freeing stock on a timer,
+         with no proof and no log line. An empty row is litter and may go. */
+      ttl: entries.length ? undefined : nowSec() + EMPTY_HOLD_TTL_SECONDS
     };
     await ddb.send(new PutItemCommand({
       TableName: tableName,
@@ -530,14 +528,30 @@ export function createStore({ tableName, client } = {}) {
 
   async function enqueueSweep(entry) {
     const { dueAt, attemptId } = entry;
+    const row = { ...entry };
+    delete row.pk; delete row.sk; delete row.ttl;
     await put({
       pk: SWEEP_PK, sk: dueKey(dueAt, attemptId),
-      ...entry,
-      attempts: entry.attempts || 0,
-      /* Outlives the backstop so cleanup never runs out of road before the
-         hold does. */
-      ttl: nowSec() + HOLD_BACKSTOP_SECONDS + 86400
+      ...row,
+      attempts: entry.attempts || 0
+      /* No TTL, on purpose. This row is the only record of which hold needs
+         settling and which payment link has to die first. If DynamoDB aged it
+         out, the hold would sit there forever with nothing coming for it, and
+         nobody would know. It is removed by deleteSweep, once settled. */
     });
+  }
+
+  /* Everything cleanup has given up on. The holds behind these are still
+     held; each one needs a person to look at the order in Square. */
+  async function stuckSweeps() {
+    const rows = await queryPk(SWEEP_PK);
+    return rows.filter(r => r.stuck === true);
+  }
+
+  /* Find one job by its attempt, for the manual release. */
+  async function sweepForAttempt(attemptId) {
+    const rows = await queryPk(SWEEP_PK);
+    return rows.find(r => r.attemptId === attemptId) || null;
   }
 
   async function dueSweeps({ now = nowSec(), limit = 25 } = {}) {
@@ -570,7 +584,7 @@ export function createStore({ tableName, client } = {}) {
 
   return {
     readCatalog, readCatalogStale, writeCatalog,
-    enqueueSweep, dueSweeps, deleteSweep, rescheduleSweep,
+    enqueueSweep, dueSweeps, deleteSweep, rescheduleSweep, stuckSweeps, sweepForAttempt,
     markIdempotencyCanceled,
     claimIdempotency, completeIdempotency, markIdempotencyRecoverable,
     saveOrder, getOrder, getOrderIdForToken, updateOrderStatus,
