@@ -40,7 +40,7 @@ than a console paste.
 ```bash
 cd backend
 npm install           # once
-npm test              # 78 checks, all against doubles — see the report
+npm test              # 158 checks, all against doubles — see the report
 npm run package       # produces backend/function.zip
 ```
 
@@ -104,11 +104,28 @@ aws secretsmanager create-secret \
 Do the same with `all-star-players/square/sandbox` and
 `"SQUARE_ENVIRONMENT": "sandbox"`.
 
-The function refuses to start if `SQUARE_ENVIRONMENT` is anything but
-`sandbox` or `production`, and refuses outright if the secret says production
-but the token looks like a sandbox one. A sandbox token cannot reach the
-production host: the base URL is derived from the environment, not configured
-separately.
+`SQUARE_ENVIRONMENT` is validated strictly: anything but exactly `sandbox` or
+`production` and the function refuses to start. **That one field is what picks
+the host**, so a sandbox credential cannot quietly reach
+`connect.squareup.com` — it is sent to whichever host the environment names,
+and Square decides whether it is valid there.
+
+Nothing inspects what the token *looks like*. An earlier build guessed the
+environment from the token's prefix and refused anything starting `EAAAl` in a
+production secret; production tokens start `EAAA` too, so it rejected a real
+credential and blocked a deployment. Square's authentication response is the
+only authority on whether a token works against a host.
+
+Every value is trimmed on the way in, so a newline picked up from a console
+paste does not turn a good token into a mysterious 401.
+
+**If a request comes back `SQUARE_AUTH_FAILED`**, Square would not accept the
+credential for the host that environment names. The CloudWatch line
+`square_auth_failed` gives the host and Square's own error code; the token is
+never logged. Check, in order: that the token belongs to the environment the
+secret names, that it has not been revoked in the Square dashboard, and that
+it carries the permissions in §0 (`ORDERS_READ`, `ORDERS_WRITE`). It is never
+retried, because retrying a refused credential cannot help.
 
 ## 5. Create the Lambda functions
 

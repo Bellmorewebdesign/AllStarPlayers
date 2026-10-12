@@ -20,12 +20,16 @@ const MAX_ATTEMPTS = Number.parseInt(process.env.SQUARE_MAX_ATTEMPTS || '3', 10)
 const MAX_PAGES = Number.parseInt(process.env.SQUARE_MAX_PAGES || '80', 10);
 
 export class SquareError extends Error {
-  constructor(message, status, errors, { retryable = false } = {}) {
+  constructor(message, status, errors, { retryable = false, authFailure = false } = {}) {
     super(message);
     this.name = 'SquareError';
     this.status = status;
     this.errors = errors || [];
     this.retryable = retryable;
+    /* Square would not accept our credential for this host. That is never
+       the shopper's problem and never worth retrying — it is a configuration
+       fault, and it is reported as one. */
+    this.authFailure = authFailure;
   }
   /* Shaped for a JSON response: codes and details, never anything secret. */
   toPublic() {
@@ -76,13 +80,21 @@ export function createSquareClient(cfg, { fetchImpl = fetch } = {}) {
     if (!res.ok) {
       const errors = Array.isArray(json.errors) ? json.errors : [];
       const retryable = res.status === 429 || res.status >= 500;
-      console.error('square_error', JSON.stringify({
+      const authFailure = res.status === 401 || res.status === 403;
+
+      console.error(authFailure ? 'square_auth_failed' : 'square_error', JSON.stringify({
         method, path, status: res.status,
+        /* The host, so a credential pointed at the wrong Square is obvious
+           from the log alone. Never the token. */
+        host: cfg.host,
         codes: errors.map(e => e.code)
       }));
+
       throw new SquareError(
-        res.status === 429 ? 'Square is rate limiting us.' : 'Square rejected the request.',
-        res.status, errors, { retryable }
+        authFailure
+          ? 'Square would not accept our credentials for ' + cfg.host + '.'
+          : res.status === 429 ? 'Square is rate limiting us.' : 'Square rejected the request.',
+        res.status, errors, { retryable, authFailure }
       );
     }
     return json;

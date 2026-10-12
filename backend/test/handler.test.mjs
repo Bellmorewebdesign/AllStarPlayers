@@ -575,14 +575,16 @@ test('the refresh route needs the admin key', async () => {
   assert.equal(J(ok).counts.products, 2);
 });
 
-test('a sandbox token in the production secret is refused', async () => {
+test('a production token is accepted whatever it happens to start with', async () => {
+  /* An earlier build guessed the environment from the token's prefix and
+     refused anything beginning "EAAAl" in a production secret. Production
+     tokens begin "EAAA" too, so that blocked a real deployment. The prefix
+     means nothing here now. */
   const { handler } = await bootstrap({
-    secrets: secretsFake({ SQUARE_ACCESS_TOKEN: 'EAAAlSANDBOXLOOKINGTOKEN', SQUARE_ENVIRONMENT: 'production' })
+    secrets: secretsFake({ SQUARE_ACCESS_TOKEN: 'EAAAlREALPRODUCTIONTOKEN', SQUARE_ENVIRONMENT: 'production' })
   });
   const r = await handler(ev('GET', '/catalog'));
-  assert.equal(r.statusCode, 500);
-  assert.equal(J(r).error, 'CONFIG_ERROR');
-  assert.match(J(r).message, /looks like a sandbox token/i);
+  assert.equal(r.statusCode, 200, 'the shop must come up: ' + r.body);
 });
 
 test('no response anywhere carries the access token', async () => {

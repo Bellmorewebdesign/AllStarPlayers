@@ -138,7 +138,7 @@ backend/
   lib/checkout.mjs     building the Square order and the payment link
   lib/webhook.mjs      signature verification and event interpretation
   lib/cleanup.mjs      cancels abandoned payment links, then frees their stock
-  test/                128 checks against a fake Square and an in-memory DynamoDB
+  test/                158 checks against a fake Square and an in-memory DynamoDB
 ```
 
 ```bash

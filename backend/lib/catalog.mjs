@@ -480,10 +480,16 @@ export async function verifyVariationsLive(square, variationIds, s) {
 
     return { ...normalised, fetchedAt: new Date().toISOString(), verified: true };
   } catch (err) {
+    /* A credential Square will not accept is not a passing wobble, and
+       telling the customer to try again in a moment would be a lie — nothing
+       will work until somebody fixes the secret. Let it through as what it
+       is. */
+    if (err?.authFailure === true) throw err;
+
     /* Square could not be asked, or would not answer. The one thing we must
        not do is fall back to a cached price or a cached stock level and let
        the sale through. */
-    console.error('availability_unverified', err?.message);
+    console.error('availability_unverified', JSON.stringify({ status: err?.status ?? null, message: err?.message }));
     throw new AvailabilityUnverifiedError(err);
   }
 }

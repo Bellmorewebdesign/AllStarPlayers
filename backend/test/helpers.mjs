@@ -156,7 +156,7 @@ export function fakeSquareFetch(handlers) {
     const method = (init.method || 'GET').toUpperCase();
     const bodyText = init.body;
     const body = bodyText ? JSON.parse(bodyText) : undefined;
-    const call = { method, path: u.pathname, query: Object.fromEntries(u.searchParams), body, headers: init.headers };
+    const call = { method, host: u.host, path: u.pathname, query: Object.fromEntries(u.searchParams), body, headers: init.headers };
     calls.push(call);
 
     /* Exact match first, then a "METHOD /prefix/*" wildcard, so routes with an

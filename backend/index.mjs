@@ -687,6 +687,12 @@ async function handleSweepRoute(event, ctx) {
   return reply(200, event, { success: true, swept: tally }, { allowedOrigins: s.allowedOrigins });
 }
 
+/* The environment is in the error's own message (the host it was refused
+   by), so this stays readable without reaching back into the config. */
+function cfgEnvironment(err) {
+  return String(err?.message || '').includes('squareupsandbox') ? 'sandbox' : 'production';
+}
+
 /* ----------------------------------------------------------------- entry */
 
 const ROUTES = [
@@ -736,6 +742,20 @@ export const handler = async (event) => {
     const store = createStore({ tableName: s.tableName });
     return await route[2](event, { cfg, s, square, store });
   } catch (err) {
+    /* Checked by flag rather than by class, and before the general Square
+       branch: a credential Square will not accept is a configuration fault,
+       not something to hand the shopper a 401 about. */
+    if (err?.authFailure === true) {
+      console.error('square_auth_failed_request', requestId, err.message);
+      return reply(500, event, {
+        success: false, error: 'SQUARE_AUTH_FAILED',
+        /* Names the environment and the host so the fault is findable, and
+           nothing else. The token never appears here or in the log. */
+        message: 'The store could not authenticate with Square. Check the access token in ' +
+                 'the secret named by SECRET_ID is valid for the ' + cfgEnvironment(err) + ' environment.',
+        requestId
+      }, { allowedOrigins: s.allowedOrigins });
+    }
     if (err instanceof SquareError) {
       const pub = err.toPublic();
       return reply(err.status >= 500 ? 502 : err.status, event, {

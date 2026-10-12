@@ -49,33 +49,53 @@ export async function loadSecrets({ client = secrets } = {}) {
     throw new ConfigError('The secret is not valid JSON.');
   }
 
-  const environment = parsed.SQUARE_ENVIRONMENT;
+  /* Secrets get pasted into consoles, and a console loves to bring a newline
+     with it. A token with a trailing \n produces an Authorization header
+     Square rejects, which looks exactly like a wrong token and wastes an
+     afternoon. Trim everything on the way in. */
+  const trimmed = (key) => {
+    const value = parsed[key];
+    return typeof value === 'string' ? value.trim() : value;
+  };
+
+  const environment = trimmed('SQUARE_ENVIRONMENT');
   if (environment !== 'sandbox' && environment !== 'production') {
     throw new ConfigError(
       'SQUARE_ENVIRONMENT must be "sandbox" or "production", not ' + JSON.stringify(environment) + '.'
     );
   }
-  if (!parsed.SQUARE_ACCESS_TOKEN) throw new ConfigError('SQUARE_ACCESS_TOKEN is missing from the secret.');
-  if (!parsed.SQUARE_LOCATION_ID) throw new ConfigError('SQUARE_LOCATION_ID is missing from the secret.');
 
-  /* A production token pasted into the sandbox secret, or vice versa, is the
-     single most expensive mistake available here. Square prefixes sandbox
-     tokens, so the mismatch is worth catching before any money moves. */
-  const looksSandbox = String(parsed.SQUARE_ACCESS_TOKEN).startsWith('EAAAl') ||
-                       String(parsed.SQUARE_ACCESS_TOKEN).includes('-sandbox-');
-  if (environment === 'production' && looksSandbox) {
-    throw new ConfigError('The secret says production but the access token looks like a sandbox token.');
-  }
+  const token = trimmed('SQUARE_ACCESS_TOKEN');
+  const locationId = trimmed('SQUARE_LOCATION_ID');
+  if (!token) throw new ConfigError('SQUARE_ACCESS_TOKEN is missing from the secret.');
+  if (!locationId) throw new ConfigError('SQUARE_LOCATION_ID is missing from the secret.');
+
+  /* There is deliberately no check on what the token LOOKS like.
+
+     An earlier version guessed at the environment from the token's prefix and
+     refused anything starting "EAAAl" in a production secret. Production
+     tokens start "EAAA" too, so that rejected perfectly good production
+     credentials and blocked a deployment. Square does not document a stable
+     prefix that distinguishes the two, and inventing one from memory was the
+     mistake.
+
+     What actually separates the environments is the host, and that is derived
+     from SQUARE_ENVIRONMENT below rather than sniffed from the credential. A
+     sandbox token therefore cannot reach the production host: it will be sent
+     there and Square will refuse it. Square's own authentication response is
+     the authority on whether a credential is valid for a host, and
+     lib/square.mjs reports a 401 or 403 as exactly that. */
 
   cached = Object.freeze({
     environment,
-    token: parsed.SQUARE_ACCESS_TOKEN,
-    locationId: parsed.SQUARE_LOCATION_ID,
+    token,
+    locationId,
     /* Only needed by the webhook route. Its absence is reported there, not
        here, so the storefront keeps working while webhooks are being set up. */
-    webhookSignatureKey: parsed.SQUARE_WEBHOOK_SIGNATURE_KEY || null,
-    /* Guards POST /catalog/refresh. Without it that route is switched off. */
-    adminKey: parsed.ADMIN_REFRESH_KEY || null,
+    webhookSignatureKey: trimmed('SQUARE_WEBHOOK_SIGNATURE_KEY') || null,
+    /* Guards the admin routes. Without it they are switched off. */
+    adminKey: trimmed('ADMIN_REFRESH_KEY') || null,
+    /* The one thing that decides which Square the service talks to. */
     host: HOSTS[environment],
     squareVersion: SQUARE_VERSION
   });
