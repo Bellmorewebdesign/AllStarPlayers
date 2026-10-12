@@ -228,9 +228,40 @@
         'Nothing is held for you until you buy it in store.';
   }
 
+  /* Square may hold a photograph on the variation as well as on the product,
+     so the picture follows the colour somebody picks. If it does not, the
+     product's own photograph stands, then one we sourced, then nothing. */
+  function drawMedia() {
+    var media = dialog.querySelector('[data-pick-media]');
+    if (!media || !product) return;
+    var pic = ASP.images ? ASP.images.forProduct(product, currentVariation()) : null;
+    /* Keyed on the product too, so two products sharing a photograph do not
+       keep each other's alt text. */
+    var key = product.id + '|' + (pic ? pic.src : '');
+    if (media.getAttribute('data-shows') === key) return;
+    media.setAttribute('data-shows', key);
+    media.innerHTML = '';
+
+    if (!pic) { media.appendChild(noPhoto()); return; }
+    var img = new Image();
+    img.src = pic.src;
+    img.alt = pic.alt || product.name;
+    img.addEventListener('error', function () {
+      img.remove();
+      media.setAttribute('data-shows', product.id + '|');
+      media.appendChild(noPhoto());
+    });
+    media.appendChild(img);
+    if (pic.credit) {
+      media.appendChild(h('p', 'pick__credit',
+        'Photo: ' + pic.credit + (pic.license ? ' (' + pic.license + ')' : '')));
+    }
+  }
+
   function draw() {
     drawOrdering();
     drawOptions();
+    drawMedia();
     var v = currentVariation();
     var add = dialog.querySelector('[data-pick-add]');
     var buy = dialog.querySelector('[data-pick-buy]');
@@ -332,17 +363,7 @@
     desc.textContent = p.description || '';
     desc.hidden = !p.description;
 
-    var media = dialog.querySelector('[data-pick-media]');
-    media.innerHTML = '';
-    if (p.imageUrls.length) {
-      var img = new Image();
-      img.src = p.imageUrls[0];
-      img.alt = p.name;
-      img.addEventListener('error', function () { img.remove(); media.appendChild(noPhoto()); });
-      media.appendChild(img);
-    } else {
-      media.appendChild(noPhoto());
-    }
+    drawMedia();
 
     message('');
     draw();
@@ -356,7 +377,7 @@
     var box = h('div', 'pick__placeholder');
     box.innerHTML = '<svg viewBox="0 0 690.8 823.4" aria-hidden="true" focusable="false">' +
       '<path fill="currentColor" d="M690.8 823.4L430.0 628.7L148.5 810.9L261.7 501.9L0.0 306.1L336.7 305.6L457.8 0.0L657.5 688.5Z"/></svg>';
-    box.appendChild(h('span', null, 'No photo for this one yet'));
+    box.appendChild(h('span', null, 'Photo unavailable'));
     return box;
   }
 

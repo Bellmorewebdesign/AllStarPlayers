@@ -50,6 +50,13 @@
 @keyframes asp-pulse{0%,100%{opacity:.25}50%{opacity:1}}
 @media (prefers-reduced-motion:reduce){.catalog-status--warm b::after{animation:none}}
 
+/* An open-licence photograph carries its credit with it. Square's own
+   photographs do not need one, so this only appears where we sourced the
+   picture ourselves. */
+.card__credit{
+  font-size:.58rem;line-height:1.5;letter-spacing:.04em;color:var(--bone-3);
+}
+
 /* ---------- what the shop can do today ----------
    Shown whenever GET /config reports no fulfillment method: the shop is
    browsable and nothing can be paid for online. Calm rather than alarming,

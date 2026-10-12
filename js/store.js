@@ -19,13 +19,17 @@
 
   var money = ASP.money;
   var state = {
-    products: [], categories: [], q: '', category: 'all',
+    products: [], categories: [], tree: [], q: '',
+    /* Where the shopper is: a department and, if they went in, one shelf
+       inside it. 'all' is the whole shop. */
+    group: 'all', sub: null,
     sort: 'name-asc', loaded: false, meta: null, shown: 60, loadedAt: 0
   };
 
   var els = {
     count: document.querySelector('[data-count]'),
-    chipWraps: document.querySelectorAll('[data-chips]'),
+    groupNav: document.querySelector('[data-group-nav]'),
+    subNav: document.querySelector('[data-sub-nav]'),
     search: document.getElementById('shop-search'),
     searchClear: document.querySelector('[data-search-clear]'),
     sort: document.getElementById('shop-sort'),
@@ -36,8 +40,6 @@
     more: document.querySelector('[data-load-more]'),
     activeFilters: document.querySelector('[data-active-filters]'),
     clearButtons: document.querySelectorAll('[data-clear-filters]'),
-    filterBtn: document.querySelector('[data-filter-open]'),
-    drawer: document.querySelector('[data-drawer]'),
     ordering: document.querySelector('[data-ordering-notice]')
   };
 
@@ -169,6 +171,8 @@
     if (result.meta && result.meta.categories && result.meta.categories.length) {
       state.categories = result.meta.categories;
     }
+    /* Counts are recounted from whatever just arrived, never carried over. */
+    rebuildTree();
   }
 
   function staleNote(meta) {
@@ -189,6 +193,12 @@
        shows a buyable-looking shop for a moment before admitting it is not.
        A failure here is not fatal: the catalog still draws, and the picker
        treats an unknown state as closed. */
+    /* Sourced photographs, if there are any. Cheap, local, and a failure
+       just means fewer pictures — so the grid never waits for it. */
+    if (ASP.images) {
+      ASP.images.load().then(function () { if (state.loaded) render(); });
+    }
+
     ASP.api.configOnce().then(applyConfig, function (err) {
       if (window.console) console.warn('[shop] could not read /config', err && err.message);
       ASP.ordering = { open: false, phone: null };
@@ -211,9 +221,10 @@
       if (!state.loaded) {
         state.loaded = true;
         state.categories = progress.meta.categories;
-        buildChips();
+        rebuildTree();
         applyDeepLink();
       }
+      rebuildTree();
       render();
       if (!progress.done && els.count) {
         els.count.textContent = 'Showing ' + state.products.length + ' of ' + progress.meta.total + ' products…';
@@ -303,9 +314,16 @@
     var query = params.get('q');
 
     if (wanted) {
-      var match = state.categories.find(function (c) { return slug(c.name) === slug(wanted); });
-      if (match) state.category = match.id;
-      else if (!query) query = wanted.replace(/-/g, ' ');
+      /* A link may name a department, a shelf, or a Square category — all
+         three resolve through the same map, so the home page tiles keep
+         working if the shop renames a category. */
+      var hit = ASP.groups.findBySlug(state.tree, state.categories, wanted);
+      if (hit) {
+        state.group = hit.group.id;
+        state.sub = hit.sub ? hit.sub.id : null;
+      } else if (!query) {
+        query = wanted.replace(/-/g, ' ');
+      }
     }
     if (query) {
       state.q = query;
@@ -324,39 +342,97 @@
     return Math.round(hours / 24) + ' days ago';
   }
 
-  function buildChips() {
-    Array.prototype.forEach.call(els.chipWraps, function (wrap) {
-      wrap.innerHTML = '';
-      var frag = document.createDocumentFragment();
-      frag.appendChild(chip({ id: 'all', name: 'Everything' }));
-      state.categories.forEach(function (c) { frag.appendChild(chip(c)); });
-      wrap.appendChild(frag);
-    });
+  /* ---------------------------------------------------------- browsing */
+
+  /* Five departments, built from the live catalog by js/catalog-groups.js.
+     Every count on screen is counted from the products the API sent. */
+  function rebuildTree() {
+    state.tree = ASP.groups.build(state.categories, state.products);
   }
 
-  function chip(c) {
-    var b = h('button', 'chip');
+  function currentGroup() {
+    if (state.group === 'all') return null;
+    return state.tree.find(function (g) { return g.id === state.group; }) || null;
+  }
+
+  function currentSub() {
+    var g = currentGroup();
+    if (!g || !state.sub) return null;
+    return g.subs.find(function (sub) { return sub.id === state.sub; }) || null;
+  }
+
+  function navButton(label, count, selected, onClick) {
+    var b = h('button', 'shop-nav__btn');
     b.type = 'button';
-    b.setAttribute('data-category', c.id);
-    b.setAttribute('aria-pressed', 'false');
-    b.innerHTML = '<span></span><span class="chip__count" aria-hidden="true"></span>';
-    b.firstChild.textContent = c.name;
-    b.addEventListener('click', function () {
-      state.category = (state.category === c.id && c.id !== 'all') ? 'all' : c.id;
-      state.shown = 60;
-      render();
-      closeDrawer();
-    });
+    b.setAttribute('aria-pressed', selected ? 'true' : 'false');
+    b.appendChild(h('span', null, label));
+    if (count != null) b.appendChild(h('span', 'shop-nav__count', String(count)));
+    b.addEventListener('click', onClick);
     return b;
   }
 
-  function matches(p) {
-    if (state.category !== 'all' && p.categoryIds.indexOf(state.category) === -1) return false;
+  function drawNav() {
+    if (!els.groupNav) return;
+
+    els.groupNav.innerHTML = '';
+    els.groupNav.appendChild(navButton('All Products', state.products.length, state.group === 'all', function () {
+      select('all', null);
+    }));
+    state.tree.forEach(function (g) {
+      if (!g.count) return;   /* a department with nothing in it is not a choice */
+      els.groupNav.appendChild(navButton(g.label, g.count, state.group === g.id, function () {
+        /* Tapping the department you are already in closes it again. */
+        select(state.group === g.id ? 'all' : g.id, null);
+      }));
+    });
+
+    if (!els.subNav) return;
+    var g = currentGroup();
+    els.subNav.innerHTML = '';
+    els.subNav.hidden = !g;
+    if (!g) return;
+
+    els.subNav.appendChild(navButton('All ' + g.label, g.count, !state.sub, function () {
+      select(g.id, null);
+    }));
+    g.subs.forEach(function (sub) {
+      if (!sub.count) return;
+      els.subNav.appendChild(navButton(sub.label, sub.count, state.sub === sub.id, function () {
+        select(g.id, state.sub === sub.id ? null : sub.id);
+      }));
+    });
+  }
+
+  function select(groupId, subId) {
+    state.group = groupId;
+    state.sub = subId;
+    state.shown = 60;
+    render();
+    /* Changing department scrolls back to the first product rather than
+       leaving somebody half way down a list they have not seen. */
+    if (grid && grid.getBoundingClientRect().top < 0) {
+      grid.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    }
+  }
+
+  /* A product is shown when it is in the chosen department (and shelf, if
+     one is chosen) AND matches the search. The two always apply together. */
+  function inSelection(p) {
+    if (state.group === 'all') return true;
+    var g = currentGroup();
+    if (!g) return true;
+    var sub = currentSub();
+    return sub ? ASP.groups.matches(p, sub, state.tree) : ASP.groups.inGroup(p, g, state.tree);
+  }
+
+  function matchesQuery(p) {
     if (!state.q) return true;
     var hay = (p.name + ' ' + p.description + ' ' +
       p.variations.map(function (v) { return (v.name || '') + ' ' + (v.sku || ''); }).join(' ')).toLowerCase();
     return state.q.toLowerCase().split(/\s+/).every(function (t) { return hay.indexOf(t) > -1; });
   }
+
+  function matches(p) { return inSelection(p) && matchesQuery(p); }
 
   var SORTS = {
     'name-asc': function (a, b) { return a.name.localeCompare(b.name, 'en'); },
@@ -384,19 +460,22 @@
     el.setAttribute('data-product-id', p.id);
 
     var media = h('div', 'card__media');
-    if (p.imageUrls.length) {
+    var pic = ASP.images ? ASP.images.forProduct(p) : null;
+    if (pic) {
       var img = new Image();
       img.className = 'card__img';
-      img.src = p.imageUrls[0];
-      img.alt = p.name;
+      img.src = pic.src;
+      img.alt = pic.alt || p.name;
       img.loading = 'lazy';
       img.decoding = 'async';
-      /* A photo Square has but cannot serve falls back to the honest
-         placeholder rather than a broken image icon. */
+      /* A photograph that will not load — Square's or ours — falls back to
+         the honest placeholder rather than a broken image icon. */
       img.addEventListener('error', function () {
         img.remove();
         media.classList.add('card__media--empty');
         media.appendChild(placeholder());
+        var old = el.querySelector('.card__credit');
+        if (old) old.remove();
       });
       media.appendChild(img);
     } else {
@@ -413,6 +492,13 @@
     body.appendChild(h('p', 'card__price', priceLabel(p)));
     if (p.hasUnpriceableVariations) {
       body.appendChild(h('p', 'card__note', 'Some options are priced in store.'));
+    }
+    /* A sourced photograph carries its credit with it, which is the
+       condition most open licences are given under. Square's own
+       photographs are the shop's and need none. */
+    if (pic && pic.credit) {
+      body.appendChild(h('p', 'card__credit', 'Photo: ' + pic.credit +
+        (pic.license ? ' (' + pic.license + ')' : '')));
     }
     var open = h('button', 'btn btn--gold btn--sm card__cta', 'Choose Options');
     open.type = 'button';
@@ -433,7 +519,7 @@
     var box = h('div', 'card__placeholder');
     box.innerHTML = '<svg viewBox="0 0 690.8 823.4" aria-hidden="true" focusable="false">' +
       '<path fill="currentColor" d="M690.8 823.4L430.0 628.7L148.5 810.9L261.7 501.9L0.0 306.1L336.7 305.6L457.8 0.0L657.5 688.5Z"/></svg>';
-    box.appendChild(h('span', null, 'No photo yet'));
+    box.appendChild(h('span', null, 'Photo unavailable'));
     return box;
   }
 
@@ -466,53 +552,47 @@
       if (els.noResultsBody) {
         els.noResultsBody.textContent = emptyShop
           ? 'New stock is added regularly — check back soon, or come see us in the shop.'
-          : 'Try another category, or clear the filters to see the whole catalog.';
+          : 'Try another department, or go back to all products.';
       }
     }
     if (els.count && state.loaded) {
+      var sub = currentSub(), group = currentGroup();
+      var where = sub ? sub.label : (group ? group.label : null);
       els.count.innerHTML = list.length
-        ? 'Showing <b>' + page.length + '</b> of ' + list.length + ' products'
+        ? 'Showing <b>' + page.length + '</b> of ' + list.length +
+          (where ? ' in ' + escapeText(where) : ' products')
         : 'Nothing matches';
     }
 
-    document.querySelectorAll('.chip').forEach(function (b) {
-      var id = b.getAttribute('data-category');
-      b.setAttribute('aria-pressed', id === state.category ? 'true' : 'false');
-      var c = b.querySelector('.chip__count');
-      if (c) {
-        var n = state.products.filter(function (p) {
-          return (id === 'all' || p.categoryIds.indexOf(id) > -1) &&
-                 (!state.q || matches(Object.assign({}, p, { categoryIds: [id === 'all' ? '' : id] })) || matchesQueryOnly(p));
-        }).length;
-        c.textContent = n ? n : '';
-      }
-    });
+    drawNav();
 
     if (els.activeFilters) {
       els.activeFilters.innerHTML = '';
-      if (state.category !== 'all') {
-        var cat = state.categories.find(function (c) { return c.id === state.category; });
-        els.activeFilters.appendChild(pill(cat ? cat.name : state.category, function () {
-          state.category = 'all'; render();
+      var g = currentGroup();
+      var sub = currentSub();
+      if (g) {
+        els.activeFilters.appendChild(pill(sub ? g.label + ' · ' + sub.label : g.label, function () {
+          select('all', null);
         }));
       }
       if (state.q) {
-        els.activeFilters.appendChild(pill('“' + state.q + '”', function () {
+        els.activeFilters.appendChild(pill('\u201C' + state.q + '\u201D', function () {
           state.q = ''; if (els.search) els.search.value = ''; render();
         }));
       }
     }
-    var pristine = state.category === 'all' && !state.q;
+    var pristine = state.group === 'all' && !state.q;
     Array.prototype.forEach.call(els.clearButtons, function (b) {
       b.hidden = pristine || state.products.length === 0;
     });
-    if (els.filterBtn) els.filterBtn.classList.toggle('has-active', state.category !== 'all');
     if (els.searchClear) els.searchClear.classList.toggle('is-visible', !!state.q);
   }
 
-  function matchesQueryOnly(p) {
-    if (!state.q) return true;
-    return (p.name + ' ' + p.description).toLowerCase().indexOf(state.q.toLowerCase()) > -1;
+  /* The only place this file writes HTML with a value in it. */
+  function escapeText(text) {
+    return String(text).replace(/[&<>"']/g, function (ch) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch];
+    });
   }
 
   function pill(label, onRemove) {
@@ -555,31 +635,11 @@
   }
   Array.prototype.forEach.call(els.clearButtons, function (b) {
     b.addEventListener('click', function () {
-      state.q = ''; state.category = 'all'; state.shown = 60;
+      state.q = '';
       if (els.search) els.search.value = '';
-      render(); closeDrawer();
+      select('all', null);
     });
   });
-
-  function closeDrawer() {
-    if (!els.drawer || !els.drawer.classList.contains('is-open')) return;
-    els.drawer.classList.remove('is-open');
-    document.body.classList.remove('drawer-open');
-    if (els.filterBtn) { els.filterBtn.setAttribute('aria-expanded', 'false'); els.filterBtn.focus(); }
-  }
-  if (els.filterBtn) {
-    els.filterBtn.addEventListener('click', function () {
-      els.drawer.classList.add('is-open');
-      document.body.classList.add('drawer-open');
-      els.filterBtn.setAttribute('aria-expanded', 'true');
-      var first = els.drawer.querySelector('.chip');
-      if (first) first.focus();
-    });
-  }
-  document.querySelectorAll('[data-drawer-close]').forEach(function (b) {
-    b.addEventListener('click', closeDrawer);
-  });
-  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeDrawer(); });
 
   ASP.shop = { reload: load, state: state };
 

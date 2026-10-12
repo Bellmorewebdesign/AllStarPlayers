@@ -23,139 +23,121 @@
 .shop-head__row{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:20px 40px}
 .shop-head p{color:var(--bone-2);max-width:52ch}
 
-/* ------------------------------------------------------------- controls */
-.controls{
+/* ---------------------------------------------------------- search bar */
+/* The one pinned thing on this page, and it is one field tall. Anything
+   bigger covers the products somebody is scrolling through — which is what
+   the old controls block did, because the whole banner was sticky just to
+   keep the search box in view. */
+.searchbar{
   position:sticky;top:var(--header-h);z-index:40;
-  background:rgba(9,9,9,.95);backdrop-filter:blur(10px);
+  background:rgba(9,9,9,.94);backdrop-filter:blur(10px);
   border-bottom:1px solid var(--line);
 }
-.controls__inner{display:grid;gap:14px;padding-block:14px}
-.controls__inner > *{min-width:0}
-.controls__top{display:flex;flex-wrap:wrap;gap:12px;align-items:center}
+.searchbar__inner{padding-block:8px}
 
-.search{position:relative;flex:1 1 260px;max-width:420px}
+.search{position:relative;display:block;width:100%}
 .search input{
-  width:100%;height:46px;padding:0 42px 0 40px;
+  width:100%;height:40px;padding:0 42px 0 38px;
   background:var(--char);border:1px solid var(--line);border-radius:var(--r);
-  color:var(--bone);font-size:.88rem;letter-spacing:.01em;
+  color:var(--bone);font-size:.85rem;letter-spacing:.01em;
   transition:border-color .3s var(--ease),background-color .3s var(--ease);
 }
 .search input::placeholder{color:var(--bone-3)}
 .search input:hover{border-color:var(--line-2)}
 .search input:focus{border-color:var(--gold-line);background:var(--char-2);outline:none}
 .search input:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
-.search__ico{position:absolute;left:14px;top:50%;transform:translateY(-50%);width:15px;height:15px;color:var(--bone-3);pointer-events:none}
+.search__ico{position:absolute;left:13px;top:50%;transform:translateY(-50%);width:14px;height:14px;color:var(--bone-3);pointer-events:none}
 .search__clear{
-  position:absolute;right:6px;top:50%;transform:translateY(-50%);
-  width:32px;height:32px;display:none;place-items:center;color:var(--bone-3);border-radius:50%;
+  position:absolute;right:5px;top:50%;transform:translateY(-50%);
+  width:30px;height:30px;display:none;place-items:center;color:var(--bone-3);border-radius:50%;
 }
 .search__clear.is-visible{display:grid}
 .search__clear:hover{color:var(--gold)}
 .search__clear svg{width:12px;height:12px}
 
-.select{position:relative;flex:0 0 auto}
-.select select{
-  appearance:none;-webkit-appearance:none;
-  height:46px;padding:0 40px 0 14px;
-  background:var(--char);border:1px solid var(--line);border-radius:var(--r);
-  color:var(--bone-2);font-size:.74rem;font-weight:600;letter-spacing:.1em;text-transform:uppercase;
-  cursor:pointer;transition:border-color .3s var(--ease),color .3s var(--ease);
+/* ------------------------------------------------- departments & shelves */
+/* Scrolls with the page. Five choices, and the shelves inside one of them
+   only when it is open. */
+.shop-nav{padding-top:clamp(18px,2.4vw,28px)}
+.shop-nav__row{display:flex;flex-wrap:wrap;gap:8px}
+.shop-nav__row--sub{
+  margin-top:10px;padding-top:12px;border-top:1px solid var(--line);
 }
-.select select:hover{border-color:var(--line-2);color:var(--bone)}
-.select select:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
-.select__ico{position:absolute;right:14px;top:50%;transform:translateY(-50%);width:11px;height:11px;color:var(--bone-3);pointer-events:none}
-.select label,.search label{
-  position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;
-  clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0;
-}
-
-/* filter chips */
-.chips{
-  display:flex;flex-wrap:wrap;gap:8px;max-width:100%;
-  scrollbar-width:none;-ms-overflow-style:none;
-}
-.chips::-webkit-scrollbar{display:none}
-.chip{
-  flex:none;scroll-snap-align:start;
-  display:inline-flex;align-items:center;gap:8px;
-  height:38px;padding:0 15px;
+.shop-nav__row--sub[hidden]{display:none}
+.shop-nav__btn{
+  display:inline-flex;align-items:baseline;gap:8px;
+  height:40px;padding:0 16px;
   border:1px solid var(--line);border-radius:var(--r);
   background:var(--char);color:var(--bone-2);
-  font-size:.68rem;font-weight:700;letter-spacing:.14em;text-transform:uppercase;
-  white-space:nowrap;
-  transition:color .3s var(--ease),border-color .3s var(--ease),background-color .3s var(--ease);
+  font-size:.72rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;white-space:nowrap;
+  transition:color .25s var(--ease),border-color .25s var(--ease),background-color .25s var(--ease);
 }
-.chip:hover{color:var(--bone);border-color:var(--line-2)}
-.chip[aria-pressed="true"]{background:var(--gold-grad);color:#0A0A0A;border-color:transparent}
-.chip__count{opacity:.6;font-size:.62rem;letter-spacing:.08em}
+.shop-nav__btn:hover{color:var(--bone);border-color:var(--line-2)}
+.shop-nav__btn[aria-pressed="true"]{background:var(--gold-grad);color:#0A0A0A;border-color:transparent}
+.shop-nav__count{font-size:.62rem;font-weight:600;letter-spacing:.06em;opacity:.6}
+/* The shelves read as one step in, not as a second row of departments. */
+.shop-nav__row--sub .shop-nav__btn{
+  height:34px;padding:0 13px;background:transparent;
+  font-size:.66rem;letter-spacing:.1em;
+}
+.shop-nav__row--sub .shop-nav__btn[aria-pressed="true"]{background:var(--gold-grad)}
 
-.controls__bottom{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px 20px}
-.result-count{font-size:.7rem;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:var(--bone-3)}
+/* ---------------------------------------------- count, filters, sorting */
+.shop-meta{
+  display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px 20px;
+  padding-top:clamp(14px,2vw,20px);
+}
+.shop-meta__right{display:flex;flex-wrap:wrap;align-items:center;gap:10px 14px}
+.result-count{font-size:.7rem;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:var(--bone-3)}
 .result-count b{color:var(--gold);font-weight:700}
 .active-filters{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
 .pill{
   display:inline-flex;align-items:center;gap:8px;
   height:30px;padding:0 6px 0 11px;
   border:1px solid var(--gold-line);border-radius:var(--r);
-  color:var(--gold);font-size:.62rem;font-weight:700;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--gold);font-size:.62rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;
 }
 .pill button{display:grid;place-items:center;width:20px;height:20px;color:inherit;opacity:.75}
 .pill button:hover{opacity:1}
 .pill svg{width:9px;height:9px}
+/* The way back out of a department, next to what is filtering the view. */
 .clear-filters{
-  font-size:.66rem;font-weight:700;letter-spacing:.16em;text-transform:uppercase;
-  color:var(--bone-3);border-bottom:1px solid transparent;padding-bottom:2px;
+  display:inline-flex;align-items:center;gap:7px;height:30px;padding:0 12px;
+  font-size:.64rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--bone-2);background:var(--char);border:1px solid var(--line);border-radius:var(--r);
   transition:color .25s var(--ease),border-color .25s var(--ease);
 }
-.clear-filters:hover{color:var(--gold);border-bottom-color:var(--gold)}
+.clear-filters svg{width:9px;height:9px;color:var(--gold)}
+.clear-filters:hover{color:var(--gold);border-color:var(--gold-line)}
 .clear-filters[hidden]{display:none}
 
-/* mobile filter drawer */
-.filter-btn{display:none}
-.drawer{display:none}
-@media (max-width:760px){
-  .controls__top{gap:10px}
-  .filter-btn{
-    display:inline-flex;align-items:center;gap:9px;height:46px;padding:0 16px;
-    border:1px solid var(--line);border-radius:var(--r);background:var(--char);
-    font-size:.68rem;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--bone);
-  }
-  .filter-btn svg{width:13px;height:13px;color:var(--gold)}
-  .filter-btn .dot{width:6px;height:6px;border-radius:50%;background:var(--gold);display:none}
-  .filter-btn.has-active .dot{display:block}
-  .chips-wrap{display:none}
-  .drawer{
-    display:block;position:fixed;inset:0;z-index:120;visibility:hidden;pointer-events:none;
-  }
-  .drawer.is-open{visibility:visible;pointer-events:auto}
-  .drawer__scrim{position:absolute;inset:0;background:rgba(4,4,4,.72);opacity:0;transition:opacity .35s var(--ease)}
-  .drawer.is-open .drawer__scrim{opacity:1}
-  .drawer__panel{
-    position:absolute;left:0;right:0;bottom:0;max-height:82vh;overflow-y:auto;
-    background:var(--ink-deep);border-top:1px solid var(--gold-line);
-    border-radius:var(--r-lg) var(--r-lg) 0 0;
-    padding:22px var(--pad) calc(24px + env(safe-area-inset-bottom));
-    transform:translateY(100%);transition:transform .42s var(--ease-out);
-  }
-  .drawer.is-open .drawer__panel{transform:none}
-  .drawer__head{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:20px}
-  .drawer__head h2{font-size:.8rem}
-  .drawer__close{width:40px;height:40px;display:grid;place-items:center;border:1px solid var(--line);border-radius:var(--r);color:var(--bone-2)}
-  .drawer__close:hover{color:var(--gold);border-color:var(--gold-line)}
-  .drawer__close svg{width:13px;height:13px}
-  .drawer .chips{flex-direction:column;flex-wrap:nowrap;overflow:visible}
-  .drawer .chip{width:100%;height:46px;justify-content:space-between}
-  .drawer__foot{
-    position:sticky;bottom:calc(-24px - env(safe-area-inset-bottom));
-    display:flex;gap:10px;margin-top:20px;
-    padding:14px 0 calc(18px + env(safe-area-inset-bottom));
-    background:linear-gradient(180deg,rgba(5,5,5,.55),var(--ink-deep) 32%);
-  }
-  .drawer__foot .btn{flex:1}
-  body.drawer-open{overflow:hidden}
+.select{position:relative;flex:0 0 auto}
+.select select{
+  appearance:none;-webkit-appearance:none;
+  height:36px;padding:0 36px 0 12px;
+  background:var(--char);border:1px solid var(--line);border-radius:var(--r);
+  color:var(--bone-2);font-size:.68rem;font-weight:600;letter-spacing:.1em;text-transform:uppercase;
+  cursor:pointer;transition:border-color .3s var(--ease),color .3s var(--ease);
 }
+.select select:hover{border-color:var(--line-2);color:var(--bone)}
+.select select:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+.select__ico{position:absolute;right:13px;top:50%;transform:translateY(-50%);width:11px;height:11px;color:var(--bone-3);pointer-events:none}
+.select label,.search label{
+  position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;
+  clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0;
+}
+
+@media (max-width:760px){
+  .searchbar__inner{padding-block:6px}
+  .search input{height:38px;font-size:.82rem}
+  .shop-nav__btn{height:36px;padding:0 12px;font-size:.66rem;letter-spacing:.09em}
+  .shop-nav__row--sub .shop-nav__btn{height:32px;padding:0 11px;font-size:.62rem}
+  .shop-meta{gap:10px 14px}
+  .shop-meta__right{width:100%;justify-content:space-between}
+}
+
 /* ------------------------------------------------------------ results */
-.results{padding-block:clamp(28px,4vw,56px) clamp(60px,8vw,120px);min-height:52vh}
+.results{padding-block:clamp(20px,2.6vw,34px) clamp(60px,8vw,120px);min-height:52vh}
 .results__note{margin-bottom:clamp(26px,3.4vw,44px)}
 .no-results{
   text-align:center;padding:clamp(46px,8vw,90px) 20px;border:1px solid var(--line);border-radius:var(--r);
@@ -212,11 +194,6 @@ body.stock-dialog-open{overflow:hidden}
 .checkout-preview > summary{cursor:pointer;color:var(--bone-3);font-size:.78rem;padding:16px 0}
 .checkout-preview .wrap{width:100%;padding-inline:0}
 @media (max-width:600px){
-  .controls__top{display:grid;grid-template-columns:auto minmax(0,1fr)}
-  .controls__top .search{grid-column:1/-1;max-width:none}
-  .controls__top .select{min-width:0}
-  .controls__top .select select{width:100%;padding-left:10px;padding-right:30px;letter-spacing:.06em}
-  .controls__top .filter-btn{padding-inline:12px}
   .stock-dialog__layout{grid-template-columns:1fr}
   .stock-dialog__placeholder{min-height:130px;padding:24px}
   .stock-dialog__placeholder svg{width:32px}

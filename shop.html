@@ -146,64 +146,44 @@
     </div>
   </section>
 
-  <!-- ════════════════════════════════════════════ controls ══════════ -->
-  <div class="controls">
-    <div class="wrap">
-      <form class="controls__inner" data-controls role="search" aria-label="Search and filter">
-        <div class="controls__top">
-          <div class="search">
-            <label for="shop-search">Search</label>
-            <svg class="search__ico" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="7" cy="7" r="5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M11 11l4 4" stroke="currentColor" stroke-width="1.5"/></svg>
-            <input id="shop-search" name="q" type="search" placeholder="Search products, colors or sizes" autocomplete="off" spellcheck="false">
-            <button class="search__clear" type="button" data-search-clear aria-label="Clear the search">
-              <svg viewBox="0 0 12 12" aria-hidden="true" focusable="false"><path d="M1 1l10 10M11 1L1 11" stroke="currentColor" stroke-width="1.6" fill="none"/></svg>
-            </button>
-          </div>
-
-          <button class="filter-btn" type="button" data-filter-open aria-expanded="false" aria-controls="filter-drawer">
-            <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M1 4h14M4 8h8M6 12h4" stroke="currentColor" stroke-width="1.6"/></svg>
-            Categories <span class="dot" aria-hidden="true"></span>
-          </button>
-
-          <div class="select">
-            <label for="shop-sort">Sort by</label>
-            <select id="shop-sort" name="sort">
-              <option value="name-asc">Name: A to Z</option>
-              <option value="price-asc">Price: Low to High</option>
-              <option value="price-desc">Price: High to Low</option>
-            </select>
-            <svg class="select__ico" viewBox="0 0 12 12" aria-hidden="true" focusable="false"><path d="M2 4l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
-          </div>
-        </div>
-
-        <!-- the category bar. On phones the same chips live in the drawer. -->
-        <div class="chips-wrap">
-          <div class="chips" data-chips role="group" aria-label="Filter by category"></div>
-        </div>
-
-        <div class="controls__bottom">
-          <p class="result-count" data-count aria-live="polite"></p>
-          <div class="active-filters" data-active-filters></div>
-          <button class="clear-filters" type="button" data-clear-filters hidden>Clear</button>
-        </div>
+  <!-- ══════════════════════════════════════ search & browsing ══════ -->
+  <!-- The only thing on this page that stays pinned: one search field.
+       Everything else — categories, sorting, counts — scrolls away like
+       the rest of a shop page. -->
+  <div class="searchbar">
+    <div class="wrap searchbar__inner">
+      <form class="search" data-controls role="search" aria-label="Search the shop" onsubmit="return false">
+        <label for="shop-search">Search</label>
+        <svg class="search__ico" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="7" cy="7" r="5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M11 11l4 4" stroke="currentColor" stroke-width="1.5"/></svg>
+        <input id="shop-search" name="q" type="search" placeholder="Search products, colors or sizes" autocomplete="off" spellcheck="false">
+        <button class="search__clear" type="button" data-search-clear aria-label="Clear the search">
+          <svg viewBox="0 0 12 12" aria-hidden="true" focusable="false"><path d="M1 1l10 10M11 1L1 11" stroke="currentColor" stroke-width="1.6" fill="none"/></svg>
+        </button>
       </form>
     </div>
   </div>
 
-  <!-- the category drawer on phones -->
-  <div class="drawer" id="filter-drawer" data-drawer>
-    <div class="drawer__scrim" data-drawer-close aria-hidden="true"></div>
-    <div class="drawer__panel" role="dialog" aria-modal="true" aria-label="Filter by category">
-      <div class="drawer__head">
-        <h2>Categories</h2>
-        <button class="drawer__close" type="button" data-drawer-close aria-label="Close">
-          <svg viewBox="0 0 12 12" aria-hidden="true" focusable="false"><path d="M1 1l10 10M11 1L1 11" stroke="currentColor" stroke-width="1.6" fill="none"/></svg>
-        </button>
-      </div>
-      <div class="chips" data-chips role="group" aria-label="Filter by category"></div>
-      <div class="drawer__foot">
-        <button class="btn btn--quiet" type="button" data-clear-filters hidden>Clear</button>
-        <button class="btn btn--gold btn--sm" type="button" data-drawer-close>Show Results</button>
+  <!-- ══════════════════════════════════════════ browsing ══════════ -->
+  <nav class="shop-nav wrap" aria-label="Shop by department">
+    <!-- Five choices, drawn by js/store.js from the live catalog. The
+         subcategory row below only appears once one is chosen. -->
+    <div class="shop-nav__row" data-group-nav role="group" aria-label="Departments"></div>
+    <div class="shop-nav__row shop-nav__row--sub" data-sub-nav role="group" aria-label="Within this department" hidden></div>
+  </nav>
+
+  <div class="wrap shop-meta">
+    <p class="result-count" data-count aria-live="polite"></p>
+    <div class="shop-meta__right">
+      <div class="active-filters" data-active-filters></div>
+      <button class="clear-filters" type="button" data-clear-filters hidden><svg viewBox="0 0 12 12" aria-hidden="true" focusable="false"><path d="M7 2L3 6l4 4" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>All products</button>
+      <div class="select">
+        <label for="shop-sort">Sort by</label>
+        <select id="shop-sort" name="sort">
+          <option value="name-asc">Name: A to Z</option>
+          <option value="price-asc">Price: Low to High</option>
+          <option value="price-desc">Price: High to Low</option>
+        </select>
+        <svg class="select__ico" viewBox="0 0 12 12" aria-hidden="true" focusable="false"><path d="M2 4l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
       </div>
     </div>
   </div>
@@ -226,8 +206,8 @@
 
     <div class="no-results" data-no-results hidden>
       <h2 data-no-results-title>Nothing matches that.</h2>
-      <p data-no-results-body>Try another category, or clear the filters to see the whole catalog.</p>
-      <button class="btn btn--ghost" type="button" data-clear-filters>Clear Filters</button>
+      <p data-no-results-body>Try another department, or go back to all products.</p>
+      <button class="btn btn--ghost" type="button" data-clear-filters>All Products</button>
     </div>
 
     <noscript>
@@ -310,6 +290,8 @@
 
 <script src="js/store-api.js"></script>
 <script src="js/cart.js"></script>
+<script src="js/catalog-groups.js"></script>
+<script src="js/product-images.js"></script>
 <script src="js/picker.js"></script>
 <script src="js/store.js"></script>
 <script src="js/main.js"></script>
