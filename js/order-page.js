@@ -163,9 +163,14 @@
 
     ASP.api.orderStatus(token).then(function (data) {
       if (data.status === 'paid') {
-        /* Only now, and only the lines this order covered. Anything else the
-           customer had in the cart is left alone. */
-        if (data.purchasedVariationIds && data.purchasedVariationIds.length) {
+        /* Only now, and only for a cart checkout.
+
+           A Buy Now purchase never touched the saved cart, and the thing it
+           bought may well also be sitting in that cart — somebody who has a
+           shirt in their bag and then buys the same shirt outright still
+           wants the one in their bag. So nothing is removed. */
+        if (data.purchaseSource !== 'buynow' &&
+            data.purchasedVariationIds && data.purchasedVariationIds.length) {
           ASP.cart.removeMany(data.purchasedVariationIds);
         }
         ASP.cart.clearBuyNow();

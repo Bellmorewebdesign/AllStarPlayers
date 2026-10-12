@@ -5,15 +5,36 @@
 
 import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
 
-export function fakeDynamo() {
-  const rows = new Map();                       /* "pk\u0000sk" -> plain object */
+/* `delay` yields to the event loop on every call, which makes two concurrent
+   handler invocations genuinely interleave rather than running to completion
+   one after the other. `failOnce` makes one named command throw, to stand in
+   for a transient DynamoDB failure or a Lambda killed mid-flight. */
+export function fakeDynamo({ delay = false, failOnce = null, rows: seed } = {}) {
+  const rows = seed || new Map();               /* "pk\u0000sk" -> plain object */
   const key = (pk, sk) => pk + '\u0000' + sk;
   const calls = [];
+  const failures = { ...(failOnce || {}) };
+  const unprocessOnce = new Set();
 
-  function conditionHolds(expr, existing) {
+  function conditionHolds(expr, existing, input) {
     if (!expr) return true;
     if (expr === 'attribute_not_exists(pk)') return existing === undefined;
     if (expr === 'attribute_exists(pk)') return existing !== undefined;
+    /* The catalog refresh lease: free, or whoever had it has run out of time. */
+    const lease = expr.match(/^attribute_not_exists\(pk\) OR (\w+) < :(\w+)$/);
+    if (lease) {
+      if (existing === undefined) return true;
+      const values = unmarshall(input.ExpressionAttributeValues || {});
+      return Number(existing[lease[1]] ?? 0) < Number(values[':' + lease[2]]);
+    }
+    /* The optimistic-concurrency check the hold rows use. */
+    const version = expr.match(/^#?(\w+) = :(\w+)$/);
+    if (version) {
+      const names = input.ExpressionAttributeNames || {};
+      const attr = names['#' + version[1]] || version[1];
+      const values = unmarshall(input.ExpressionAttributeValues || {});
+      return existing !== undefined && existing[attr] === values[':' + version[2]];
+    }
     throw new Error('fakeDynamo does not implement condition: ' + expr);
   }
 
@@ -28,11 +49,31 @@ export function fakeDynamo() {
       const name = cmd.constructor.name;
       const input = cmd.input;
       calls.push(name);
+      if (delay) await new Promise(r => setTimeout(r, 0));
+
+      /* A targeted one-shot failure: { UpdateItemCommand: 'ORDER#' } throws the
+         first time an UpdateItem touches a key starting with that prefix. */
+      const trigger = failures[name];
+      if (trigger !== undefined) {
+        const k = input.Key ? unmarshall(input.Key) : (input.Item ? unmarshall(input.Item) : {});
+        const matches = trigger === true
+          ? true
+          : typeof trigger === 'string'
+            ? String(k.pk || '').startsWith(trigger)
+            : String(k.pk || '').startsWith(trigger.pk || '') &&
+              (trigger.sk === undefined || k.sk === trigger.sk);
+        if (matches) {
+          delete failures[name];
+          const err = new Error('simulated DynamoDB failure on ' + name);
+          err.name = 'ProvisionedThroughputExceededException';
+          throw err;
+        }
+      }
 
       if (name === 'PutItemCommand') {
         const item = unmarshall(input.Item);
         const k = key(item.pk, item.sk);
-        if (!conditionHolds(input.ConditionExpression, rows.get(k))) throw fail();
+        if (!conditionHolds(input.ConditionExpression, rows.get(k), input)) throw fail();
         rows.set(k, item);
         return {};
       }
@@ -45,15 +86,22 @@ export function fakeDynamo() {
 
       if (name === 'DeleteItemCommand') {
         const { pk, sk } = unmarshall(input.Key);
-        rows.delete(key(pk, sk));
+        const k = key(pk, sk);
+        if (!conditionHolds(input.ConditionExpression, rows.get(k), input)) throw fail();
+        rows.delete(k);
         return {};
       }
 
       if (name === 'QueryCommand') {
         const values = unmarshall(input.ExpressionAttributeValues);
         const pk = values[':pk'];
-        const items = [...rows.values()].filter(r => r.pk === pk)
+        let items = [...rows.values()].filter(r => r.pk === pk)
           .sort((a, b) => String(a.sk).localeCompare(String(b.sk)));
+        /* The sweep queue reads a range of the sort key. */
+        if (/#sk <\s*:sk/.test(input.KeyConditionExpression || '')) {
+          items = items.filter(r => String(r.sk) < String(values[':sk']));
+        }
+        if (input.Limit) items = items.slice(0, input.Limit);
         return { Items: items.map(i => marshall(i, { removeUndefinedValues: true })) };
       }
 
@@ -61,7 +109,7 @@ export function fakeDynamo() {
         const { pk, sk } = unmarshall(input.Key);
         const k = key(pk, sk);
         const existing = rows.get(k);
-        if (!conditionHolds(input.ConditionExpression, existing)) throw fail();
+        if (!conditionHolds(input.ConditionExpression, existing, input)) throw fail();
         const values = unmarshall(input.ExpressionAttributeValues);
         const names = input.ExpressionAttributeNames || {};
         const next = { ...(existing || { pk, sk }) };
@@ -74,8 +122,19 @@ export function fakeDynamo() {
       }
 
       if (name === 'BatchWriteItemCommand') {
-        for (const [, reqs] of Object.entries(input.RequestItems)) {
-          for (const r of reqs) {
+        /* The real BatchWriteItem is allowed to silently drop writes and hand
+           them back in UnprocessedItems. Callers that ignore that field lose
+           data, so the fake does it too on the first call per table. */
+        const out = {};
+        for (const [table, reqs] of Object.entries(input.RequestItems)) {
+          let todo = reqs;
+          if (unprocessOnce.has(table)) {
+            unprocessOnce.delete(table);
+            const held = reqs.slice(0, Math.min(1, reqs.length));
+            todo = reqs.slice(held.length);
+            if (held.length) out[table] = held;
+          }
+          for (const r of todo) {
             if (r.PutRequest) {
               const item = unmarshall(r.PutRequest.Item);
               rows.set(key(item.pk, item.sk), item);
@@ -85,7 +144,7 @@ export function fakeDynamo() {
             }
           }
         }
-        return {};
+        return Object.keys(out).length ? { UnprocessedItems: out } : {};
       }
 
       throw new Error('fakeDynamo does not implement ' + name);
@@ -95,6 +154,8 @@ export function fakeDynamo() {
   return {
     client, calls,
     rows,
+    /* Make the next BatchWriteItem for this table leave one write undone. */
+    dropNextBatchWrite: (table = 'asp-store-test') => unprocessOnce.add(table),
     dump: () => [...rows.values()],
     find: (prefix) => [...rows.values()].filter(r => String(r.pk).startsWith(prefix))
   };
@@ -110,7 +171,7 @@ export function fakeSquareFetch(handlers) {
     const method = (init.method || 'GET').toUpperCase();
     const bodyText = init.body;
     const body = bodyText ? JSON.parse(bodyText) : undefined;
-    const call = { method, path: u.pathname, query: Object.fromEntries(u.searchParams), body, headers: init.headers };
+    const call = { method, host: u.host, path: u.pathname, query: Object.fromEntries(u.searchParams), body, headers: init.headers };
     calls.push(call);
 
     /* Exact match first, then a "METHOD /prefix/*" wildcard, so routes with an
@@ -290,12 +351,35 @@ export function inventoryResponse(ids) {
   };
 }
 
+/* Square answers a batch-retrieve of variation ids with the variations
+   themselves (each naming its parent in item_id) plus the parent items in
+   related_objects. This is the call the checkout verification makes. */
+export function batchRetrieveResponse(objectIds) {
+  const wanted = new Set(objectIds || []);
+  const objects = []; const related = [];
+  for (const obj of catalogFixture().objects) {
+    if (obj.type === 'ITEM') {
+      const hits = (obj.item_data.variations || []).filter(v => wanted.has(v.id));
+      if (hits.length) {
+        objects.push(...hits.map(v => ({
+          ...v, item_variation_data: { ...v.item_variation_data, item_id: obj.id }
+        })));
+        related.push(obj);
+      }
+    }
+    if (wanted.has(obj.id)) objects.push(obj);
+  }
+  return { objects, related_objects: related };
+}
+
 /* The handler map most tests want. */
 export function squareHandlers(overrides = {}) {
   return {
     'GET /v2/catalog/list': () => ({ json: catalogFixture() }),
     'POST /v2/inventory/counts/batch-retrieve': ({ body }) =>
       ({ json: inventoryResponse(body.catalog_object_ids || []) }),
+    'POST /v2/catalog/batch-retrieve': ({ body }) =>
+      ({ json: batchRetrieveResponse(body.object_ids || []) }),
     ...overrides
   };
 }
@@ -342,3 +426,15 @@ export const secretsFake = (overrides = {}) => ({
     })
   })
 });
+
+
+/* Browsing reads a published snapshot and never builds one, so a test that
+   wants a shop to browse has to run the refresh task first — exactly as the
+   EventBridge schedule does in production. */
+export async function warmCatalog(handler) {
+  const result = await handler({ task: 'refresh-catalog' });
+  if (result && result.refreshed === false && result.reason === 'failed') {
+    throw new Error('refresh-catalog failed while warming a test: ' + result.error);
+  }
+  return result;
+}

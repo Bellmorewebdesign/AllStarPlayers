@@ -167,6 +167,8 @@ export async function readOrderStatus(square, orderId) {
     status,
     state: order.state || null,
     orderId: order.id,
+    version: order.version ?? null,
+    tenderCount: tenders.length,
     createdAt: order.created_at || null,
     closedAt: order.closed_at || null,
     totals: {
@@ -188,4 +190,52 @@ export async function readOrderStatus(square, orderId) {
       state: f.state || null
     }))
   };
+}
+
+
+/* ------------------------------------------------------ cancelling a link */
+
+/* DELETE /v2/online-checkout/payment-links/{id}
+   Square's reference says this deletes the link and sets the order it created
+   to CANCELED, answering with { id, cancelled_order_id }.
+
+   It is not treated as proof. There are developer-forum reports of this
+   returning 200 with no cancelled_order_id while the order stayed live and
+   the link stayed payable, and no public resolution. So every caller here
+   re-reads the order afterwards and believes that instead. A missing
+   cancelled_order_id is the tell, and it is surfaced rather than swallowed. */
+export async function deletePaymentLink(square, paymentLinkId) {
+  try {
+    const res = await square.call(
+      '/v2/online-checkout/payment-links/' + encodeURIComponent(paymentLinkId),
+      { method: 'DELETE', idempotent: true }
+    );
+    return {
+      deleted: true,
+      cancelledOrderId: res?.cancelled_order_id || null,
+      /* 200 but nothing cancelled: the documented field is missing. */
+      claimsCancelled: Boolean(res?.cancelled_order_id)
+    };
+  } catch (err) {
+    /* Already gone is a success for our purposes — but the order still has to
+       be checked, because a deleted link is not a cancelled order. */
+    if (err?.status === 404) return { deleted: true, alreadyGone: true, claimsCancelled: false };
+    throw err;
+  }
+}
+
+/* The fallback, for an account where deleting the link demonstrably does not
+   cancel the order. Off by default (CLEANUP_FORCE_CANCEL_ORDER) because it is
+   the part of this flow that could not be verified against a live Square
+   account from here. Turn it on only after a sandbox run shows it is needed
+   and that it works. Either way the result is verified by re-reading. */
+export async function cancelOrder(square, { orderId, version, locationId }) {
+  return square.call('/v2/orders/' + encodeURIComponent(orderId), {
+    method: 'PUT',
+    idempotent: true,
+    body: {
+      idempotency_key: 'cancel-' + orderId + '-v' + String(version ?? 0),
+      order: { location_id: locationId, version, state: 'CANCELED' }
+    }
+  });
 }

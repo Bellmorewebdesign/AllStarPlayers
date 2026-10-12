@@ -49,33 +49,53 @@ export async function loadSecrets({ client = secrets } = {}) {
     throw new ConfigError('The secret is not valid JSON.');
   }
 
-  const environment = parsed.SQUARE_ENVIRONMENT;
+  /* Secrets get pasted into consoles, and a console loves to bring a newline
+     with it. A token with a trailing \n produces an Authorization header
+     Square rejects, which looks exactly like a wrong token and wastes an
+     afternoon. Trim everything on the way in. */
+  const trimmed = (key) => {
+    const value = parsed[key];
+    return typeof value === 'string' ? value.trim() : value;
+  };
+
+  const environment = trimmed('SQUARE_ENVIRONMENT');
   if (environment !== 'sandbox' && environment !== 'production') {
     throw new ConfigError(
       'SQUARE_ENVIRONMENT must be "sandbox" or "production", not ' + JSON.stringify(environment) + '.'
     );
   }
-  if (!parsed.SQUARE_ACCESS_TOKEN) throw new ConfigError('SQUARE_ACCESS_TOKEN is missing from the secret.');
-  if (!parsed.SQUARE_LOCATION_ID) throw new ConfigError('SQUARE_LOCATION_ID is missing from the secret.');
 
-  /* A production token pasted into the sandbox secret, or vice versa, is the
-     single most expensive mistake available here. Square prefixes sandbox
-     tokens, so the mismatch is worth catching before any money moves. */
-  const looksSandbox = String(parsed.SQUARE_ACCESS_TOKEN).startsWith('EAAAl') ||
-                       String(parsed.SQUARE_ACCESS_TOKEN).includes('-sandbox-');
-  if (environment === 'production' && looksSandbox) {
-    throw new ConfigError('The secret says production but the access token looks like a sandbox token.');
-  }
+  const token = trimmed('SQUARE_ACCESS_TOKEN');
+  const locationId = trimmed('SQUARE_LOCATION_ID');
+  if (!token) throw new ConfigError('SQUARE_ACCESS_TOKEN is missing from the secret.');
+  if (!locationId) throw new ConfigError('SQUARE_LOCATION_ID is missing from the secret.');
+
+  /* There is deliberately no check on what the token LOOKS like.
+
+     An earlier version guessed at the environment from the token's prefix and
+     refused anything starting "EAAAl" in a production secret. Production
+     tokens start "EAAA" too, so that rejected perfectly good production
+     credentials and blocked a deployment. Square does not document a stable
+     prefix that distinguishes the two, and inventing one from memory was the
+     mistake.
+
+     What actually separates the environments is the host, and that is derived
+     from SQUARE_ENVIRONMENT below rather than sniffed from the credential. A
+     sandbox token therefore cannot reach the production host: it will be sent
+     there and Square will refuse it. Square's own authentication response is
+     the authority on whether a credential is valid for a host, and
+     lib/square.mjs reports a 401 or 403 as exactly that. */
 
   cached = Object.freeze({
     environment,
-    token: parsed.SQUARE_ACCESS_TOKEN,
-    locationId: parsed.SQUARE_LOCATION_ID,
+    token,
+    locationId,
     /* Only needed by the webhook route. Its absence is reported there, not
        here, so the storefront keeps working while webhooks are being set up. */
-    webhookSignatureKey: parsed.SQUARE_WEBHOOK_SIGNATURE_KEY || null,
-    /* Guards POST /catalog/refresh. Without it that route is switched off. */
-    adminKey: parsed.ADMIN_REFRESH_KEY || null,
+    webhookSignatureKey: trimmed('SQUARE_WEBHOOK_SIGNATURE_KEY') || null,
+    /* Guards the admin routes. Without it they are switched off. */
+    adminKey: trimmed('ADMIN_REFRESH_KEY') || null,
+    /* The one thing that decides which Square the service talks to. */
     host: HOSTS[environment],
     squareVersion: SQUARE_VERSION
   });
@@ -146,8 +166,26 @@ export function settings() {
     /* How long a cached catalog stays usable before it is refetched. Prices
        and stock are revalidated against Square at checkout regardless, so
        this only controls how stale the browsing experience can be. */
-    catalogTtlSeconds: int('CATALOG_TTL_SECONDS', 600),
+    /* How old a snapshot may be before the storefront is told it is stale.
+       It is still served either way: a shop window a few minutes behind is
+       fine, and nothing it shows is what gets charged. */
+    catalogTtlSeconds: int('CATALOG_TTL_SECONDS', 900),
     catalogPageSize: int('CATALOG_PAGE_SIZE', 120),
+
+    /* How long a build that has been replaced is kept before deletion.
+       A browsing request reads the pointer and the chunks as two separate
+       calls, so deleting the old build the instant the new one lands strands
+       anybody in between. Must comfortably exceed the slowest such read. */
+    buildRetentionSeconds: int('BUILD_RETENTION_SECONDS', 900),
+
+    /* How long the refresh lease lasts. It MUST be longer than the Lambda's
+       own timeout, or a slow refresh would lose the lease while still
+       running and a second one could start on top of it. */
+    refreshLeaseSeconds: int('REFRESH_LEASE_SECONDS', 600),
+
+    /* What a browsing request is told to wait before asking again while the
+       very first snapshot is still being built. */
+    catalogWarmRetrySeconds: int('CATALOG_WARM_RETRY_SECONDS', 15),
 
     /* Square's own page sizes. Conservative on purpose; raise them only after
        checking the current documented maximums. */
@@ -163,6 +201,12 @@ export function settings() {
     /* A soft hold is not a reservation. See lib/store.mjs. */
     holdSeconds: int('STOCK_HOLD_SECONDS', 900),
     holdsEnabled: bool('STOCK_HOLDS_ENABLED', true),
+
+    /* How long after a hold's clock runs out before cleanup goes near it.
+       The gap is deliberate: a customer on Square's page when the hold lapses
+       should be allowed to finish rather than have the link pulled from under
+       them. The stock stays held throughout. */
+    cleanupGraceSeconds: int('CLEANUP_GRACE_SECONDS', 180),
 
     maxCartLines: int('MAX_CART_LINES', 40),
     maxLineQuantity: int('MAX_LINE_QUANTITY', 20),

@@ -11,10 +11,16 @@
 (function () {
   'use strict';
 
+  /* The production API. 844 products, real Square prices and stock, rebuilt
+     by a scheduled job every 15 minutes. There is no credential here and
+     there never can be: the token lives in AWS Secrets Manager, and this
+     file only ever sends ids, quantities and what the customer typed. */
   var API_BASE = window.ASP_API_BASE ||
-    'https://n9ecaydkv4.execute-api.us-east-1.amazonaws.com/default';
+    'https://uf04sxkrfk.execute-api.us-east-1.amazonaws.com/default';
 
   var ASP = window.ASP || (window.ASP = {});
+
+  var configPromise = null;
 
   function request(path, options) {
     var opts = options || {};
@@ -37,6 +43,10 @@
         err.status = res.status;
         err.code = (body && body.error) || 'HTTP_' + res.status;
         err.body = body;
+        /* The server tells us how long to leave it when something is still
+           warming up, so the page does not have to guess. */
+        err.retryAfterSeconds = body && Number(body.retryAfterSeconds) > 0
+          ? Number(body.retryAfterSeconds) : null;
         throw err;
       });
     }, function (networkError) {
@@ -52,33 +62,72 @@
   /* The catalog arrives a page at a time. The first page comes back quickly so
      the grid can draw, and the rest follow in the background, so the whole
      catalog ends up searchable rather than just the first screen of it. */
-  function fetchCatalog(onPage) {
-    var all = [];
-    var meta = null;
+  /* Walks every page of the catalog.
 
-    function page(cursor) {
-      var qs = cursor ? '?cursor=' + encodeURIComponent(cursor) : '';
-      return request('/catalog' + qs).then(function (data) {
-        if (!data || data.success !== true) throw new Error('The catalog service reported a problem.');
-        if (!meta) {
-          meta = {
-            total: data.total, categories: data.categories || [],
-            fetchedAt: data.fetchedAt, stale: data.stale === true,
-            environment: data.environment
-          };
-        }
-        all = all.concat(data.products || []);
-        if (onPage) onPage({ products: all, meta: meta, done: !data.cursor });
-        if (data.cursor) return page(data.cursor);
-        return { products: all, meta: meta };
-      });
+     Pages are pinned server-side to one build of the catalog, and the cursor
+     carries that build. If a refresh lands while we are part-way through, the
+     build we started on eventually goes away and the server answers 409
+     CATALOG_CURSOR_EXPIRED rather than handing us a page from the new one.
+     The only correct response is to throw away what we have and walk again
+     from the top: half of one catalog plus half of another is a list with
+     products missing and products repeated. */
+  function fetchCatalog(onPage) {
+    var RESTART_LIMIT = 3;
+
+    function walk(restarts) {
+      var all = [];
+      var meta = null;
+
+      function page(cursor) {
+        var qs = cursor ? '?cursor=' + encodeURIComponent(cursor) : '';
+        return request('/catalog' + qs).then(function (data) {
+          if (!data || data.success !== true) throw new Error('The catalog service reported a problem.');
+          if (!meta) {
+            meta = {
+              total: data.total, categories: data.categories || [],
+              fetchedAt: data.fetchedAt, stale: data.stale === true,
+              ageSeconds: typeof data.ageSeconds === 'number' ? data.ageSeconds : null,
+              buildId: data.buildId || null,
+              environment: data.environment
+            };
+          }
+          all = all.concat(data.products || []);
+          if (onPage) onPage({ products: all, meta: meta, done: !data.cursor });
+          if (data.cursor) return page(data.cursor);
+          return { products: all, meta: meta };
+        }, function (err) {
+          if (err && err.code === 'CATALOG_CURSOR_EXPIRED' && restarts < RESTART_LIMIT) {
+            /* Start over, and hand the caller the clean slate so a partly
+               drawn grid is not left with the old build's products in it. */
+            if (onPage) onPage({ products: [], meta: null, done: false, restarted: true });
+            return walk(restarts + 1);
+          }
+          throw err;
+        });
+      }
+      return page(null);
     }
-    return page(null);
+    return walk(0);
   }
 
   ASP.api = {
     base: API_BASE,
     config: function () { return request('/config'); },
+    /* What the shop is able to do right now — which fulfillment methods are
+       switched on, the phone number, the cart limits. Asked once per page
+       load and shared, because several pieces of the page need it and the
+       answer cannot change between them. */
+    configOnce: function () {
+      if (!configPromise) {
+        configPromise = request('/config').then(function (data) {
+          if (!data || data.success !== true || !data.config) {
+            throw new Error('The shop could not tell us what it can do right now.');
+          }
+          return data.config;
+        }, function (err) { configPromise = null; throw err; });
+      }
+      return configPromise;
+    },
     catalog: fetchCatalog,
     validateCart: function (lines) {
       return request('/cart/validate', { method: 'POST', body: { lines: lines } });

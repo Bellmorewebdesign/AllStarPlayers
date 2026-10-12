@@ -70,6 +70,23 @@ order.html   what Square decided   -> js/order-page.js
   quantities and the customer's own details. Prices come from Square's catalog,
   the shipping charge from the shop's configured zones, and tax from the shop's
   own Square tax rules. A price edited in localStorage changes nothing.
+- **Browsing reads a snapshot; buying reads Square.** The product list is
+  rebuilt by a scheduled background job — 844 products and 5,869 variations
+  take minutes to page out of Square, far longer than any web request may
+  last — and the shop page reads whatever that job last published, with its
+  age shown. A checkout re-reads price and stock from Square for exactly the
+  variations in that cart, every time, and refuses the sale outright if
+  Square cannot answer.
+- **One product list, never two stitched together.** Pages are pinned to the
+  build they started on: the cursor names it, and the build is kept for fifteen
+  minutes after a newer one goes live. If a shopper's build does go, the API
+  says so (`409`) and the page reloads the list from the top rather than
+  joining half of one catalog to half of another.
+- **An empty shop is shown as an empty shop.** If the scheduled job reads
+  Square completely and nothing is sellable, it publishes that, and the page
+  says everything is sold out. A *failed* read does the opposite and keeps the
+  last good list serving, so people are never sent after products that are
+  not there.
 - **Only ids and quantities are stored locally.** Anything else goes stale, and
   a stale price in storage is exactly what an attacker would like to edit.
 - **Unknown stock is not unlimited stock.** A variation Square is not counting
@@ -78,6 +95,28 @@ order.html   what Square decided   -> js/order-page.js
   online; the card says it is priced in store.
 - **A payment link is not a payment.** Neither is a redirect. The order page
   asks our API, which asks Square, and says "checking" until it knows.
+- **Two shoppers cannot be sold the same last unit.** Holds on a variation
+  live in one row and are taken with a single conditional write, so the race
+  is settled by DynamoDB rather than by luck.
+- **Stock is never freed on a timer — at any age.** A Square payment link does
+  not expire, so a hold that merely ran out of clock is not proof of anything.
+  A scheduled sweep cancels the abandoned link first and re-asks Square whether
+  it really died; only then does the unit go back on the website. A hold that
+  cannot be settled stays held indefinitely and is flagged for a person
+  (`backend/DEPLOY.md` §9c), because a silent release is the one failure
+  nobody would ever find. What this still does *not* cover — a sale over the
+  counter — is written down in §9 rather than glossed over.
+- **The site only offers what the API says it can do.** `GET /config` decides
+  whether there is a checkout at all. With pickup and shipping both switched
+  off, as production runs today, there is no Buy Now, no checkout form and no
+  Pay button anywhere — the cart is a list to bring into the store, and the
+  page says that in those words. Switching a method on in AWS brings the
+  checkout back with no change here.
+- **A tab left open gets refreshed, not trusted.** Coming back to the page
+  re-fetches the catalog if it is more than a minute old, quietly, keeping
+  the filters, the search and the cart exactly as they were.
+- **Buy Now never empties your cart**, even when you buy something that is
+  already in it.
 - **Nothing is promised that is not built.** No UPS rates, no tracking numbers,
   no automated pickup email, no guaranteed stock reservation. Where a
   limitation exists, the page says so.
@@ -99,8 +138,13 @@ One line, at the top of `js/store-api.js`:
 
 ```js
 var API_BASE = window.ASP_API_BASE ||
-  'https://n9ecaydkv4.execute-api.us-east-1.amazonaws.com/default';
+  'https://uf04sxkrfk.execute-api.us-east-1.amazonaws.com/default';
 ```
+
+That is the production API: 844 products with live Square prices and stock.
+Online ordering is not switched on — `GET /config` reports no pickup and no
+shipping, and the site reads that answer and says so rather than offering a
+checkout that cannot finish.
 
 ### The back end
 
@@ -119,7 +163,9 @@ backend/
   lib/fulfillment.mjs  pickup and shipping validation, configured rates
   lib/checkout.mjs     building the Square order and the payment link
   lib/webhook.mjs      signature verification and event interpretation
-  test/                78 checks against a fake Square and an in-memory DynamoDB
+  lib/cleanup.mjs      cancels abandoned payment links, then frees their stock
+  lib/refresh.mjs      the scheduled catalog rebuild, and its atomic publish
+  test/                197 checks against a fake Square and an in-memory DynamoDB
 ```
 
 ```bash

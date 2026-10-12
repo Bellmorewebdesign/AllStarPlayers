@@ -85,6 +85,12 @@ export function interpret(event) {
    backwards and tell a customer their completed order is still processing. */
 const RANK = { pending: 0, canceled: 1, failed: 1, paid: 2 };
 
+/* paid, canceled and failed are all ends of the road: Square owns the
+   outcome from there, so anything we were holding on the shelf goes back. */
+export function isTerminal(status) {
+  return status === 'paid' || status === 'canceled' || status === 'failed';
+}
+
 export function shouldApply(currentStatus, nextStatus) {
   if (!currentStatus) return true;
   if (currentStatus === nextStatus) return false;

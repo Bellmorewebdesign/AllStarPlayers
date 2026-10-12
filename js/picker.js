@@ -62,7 +62,7 @@
             '<button class="btn btn--ghost" type="button" data-pick-buy>Buy Now</button>' +
           '</div>' +
           '<p class="pick__msg" data-pick-msg role="status"></p>' +
-          '<p class="pick__fine">Tax and any shipping are worked out at checkout.</p>' +
+          '<p class="pick__fine" data-pick-fine></p>' +
         '</div>' +
       '</div>';
     document.body.appendChild(dialog);
@@ -206,7 +206,30 @@
     draw();
   }
 
+  /* What the shop can do right now, as the API reported it on page load.
+     An unknown answer is treated as closed: offering a checkout that cannot
+     finish is worse than not offering one. */
+  function ordering() {
+    var o = ASP.ordering;
+    return { open: !!(o && o.open), phone: (o && o.phone) || null };
+  }
+
+  /* "Buy Now" goes straight to a checkout, so it only exists when a checkout
+     exists. "Add to Cart" stays either way: with ordering closed the cart is
+     a list to bring into the store, which the fine print says plainly. */
+  function drawOrdering() {
+    var o = ordering();
+    var buy = dialog.querySelector('[data-pick-buy]');
+    var fine = dialog.querySelector('[data-pick-fine]');
+    buy.hidden = !o.open;
+    fine.textContent = o.open
+      ? 'Tax and any shipping are worked out at checkout.'
+      : 'Online ordering is not open yet, so this builds a list rather than an order. ' +
+        'Nothing is held for you until you buy it in store.';
+  }
+
   function draw() {
+    drawOrdering();
     drawOptions();
     var v = currentVariation();
     var add = dialog.querySelector('[data-pick-add]');
@@ -257,6 +280,8 @@
   function commit(mode) {
     var v = currentVariation();
     if (!v || !v.sellable) return;
+    /* Belt and braces: the button is hidden, and this refuses anyway. */
+    if (mode === 'buy' && !ordering().open) return;
 
     var add = dialog.querySelector('[data-pick-add]');
     var buy = dialog.querySelector('[data-pick-buy]');
