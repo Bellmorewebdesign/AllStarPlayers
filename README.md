@@ -121,6 +121,40 @@ order.html   what Square decided   -> js/order-page.js
   no automated pickup email, no guaranteed stock reservation. Where a
   limitation exists, the page says so.
 
+### Browsing
+
+Square keeps thirty-seven categories, and they are the store's own working
+labels: `HAT` and `HATS` are separate, so are `TEE`, `T-SHIRTS` and
+`LS TSHIRT`, and a fifth of the catalog has no category at all. The shop page
+shows five choices instead — All Products, Clothing, Footwear, Accessories,
+Care & Other — and the shelves inside one only once it is opened.
+
+That grouping lives in `js/catalog-groups.js` and nowhere else. It is keyed on
+**Square's category ids**, because a shop renames a category whenever it likes;
+the names are kept only as a fallback for a category deleted and recreated
+under a new id. Anything the map has never seen — a new Square category, or no
+category at all — lands in *Care & Other · Not Sorted Yet* rather than
+disappearing from the shop. Every count on screen is counted from the products
+the API returned.
+
+Only the search field is pinned while you scroll. Departments, shelves, the
+count, the filter chips and the sort control all scroll away like the rest of
+the page.
+
+### Product photographs
+
+In order: the photograph on the chosen **variation** in Square, then the one on
+the **product** in Square, then one **we sourced** (`assets/products/`), then a
+plain *"Photo unavailable"* card. A broken image falls back the same way.
+
+Photographs uploaded to Square reach the website on the next catalog refresh
+with no code change, which is why that is the right place to put them.
+`assets/products/README.md` covers the alternative — a manifest keyed by Square
+product id, carrying the source, licence and credit for each file — and the two
+rules it enforces: the photograph must show the actual item, and its licence
+must permit a storefront. `node tools/product-images.mjs` reports where the
+catalog stands; `--check` validates the manifest.
+
 ### The cart
 
 `js/cart.js` keeps `{variationId, quantity}` pairs in `localStorage` under
@@ -226,7 +260,9 @@ css/
 js/
   store-api.js          the only file that knows the API URL
   cart.js               the cart: ids and quantities, the badge, buy-now
-  store.js              the shop grid, search and category filters
+  store.js              the shop grid, search and department filters
+  catalog-groups.js     Square's 37 categories grouped into five departments
+  product-images.js     where a product's photograph comes from, in order
   picker.js             the size and colour dialog
   cart-page.js          the cart page and the checkout form
   order-page.js         the server-verified order status page
@@ -235,6 +271,7 @@ js/
   main.js               sticky header, phone menu, scroll reveals, the video
 tools/
   build-media.sh        Regenerates assets/img and assets/video from the originals
+  product-images.mjs    Photograph coverage, and validates assets/products
 backend/
   index.mjs             The store API Lambda
   lib/                  Its modules
@@ -242,6 +279,7 @@ backend/
   DEPLOY.md             <- read this before touching AWS
 assets/
   brand/                Vector logo, favicons, web manifest, social share image
+  products/             Photographs we sourced, with their licences (see its README)
   fonts/                Self-hosted Boldonse + Instrument Sans (SIL OFL, licences included)
   img/                  Generated WebP + JPEG crops used across the site
   img/originals/        The six original photographs, untouched

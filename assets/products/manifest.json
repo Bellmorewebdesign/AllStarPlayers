@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "about": "Photographs we sourced ourselves, for products Square has no image for. Keyed by Square product (catalog item) id, which is stable across price and stock changes. Nothing about the catalog itself belongs in here: no names, no prices, no stock.",
+  "rules": [
+    "The photograph must show the actual item: same brand, same model, same colour. A photograph of a different colourway is a wrong answer, not a near one.",
+    "Only images whose licence permits use on a commercial storefront, with the licence and credit recorded in the row.",
+    "Files are downloaded, optimised and committed under assets/products/. No hotlinks to someone else's server.",
+    "If no accurate, usable photograph exists, leave the product out of this file. The shop shows 'Photo unavailable', which is true."
+  ],
+  "fields": {
+    "file": "path, relative to the site root, of the committed image",
+    "alt": "what the photograph shows, for screen readers",
+    "source": "where it came from, e.g. 'Wikimedia Commons'",
+    "sourceUrl": "the page it came from, so the claim can be checked",
+    "license": "e.g. 'CC BY-SA 4.0', 'CC0 1.0'",
+    "licenseUrl": "the licence text",
+    "credit": "who to credit, shown under the photograph when the licence asks for it",
+    "matchedOn": "how it was confirmed to be this exact item",
+    "addedAt": "YYYY-MM-DD"
+  },
+  "images": {}
+}
