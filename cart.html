@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Your Cart | All Star Players</title>
-<meta name="description" content="Review your All Star Players order and check out with store collection or shipping.">
+<meta name="description" content="Review your All Star Players cart. Prices and stock are checked against our store system every time this page loads.">
 <meta name="robots" content="noindex">
 <meta name="theme-color" content="#0A0A0A">
 <meta name="author" content="All Star Players">
@@ -148,6 +148,10 @@
         <div style="display:grid;gap:18px">
           <div class="sum" data-cart-summary hidden></div>
 
+          <!-- When GET /config reports no fulfillment method, the checkout
+               form below is not shown at all and this says why. -->
+          <div class="ordering-notice" data-ordering-notice hidden></div>
+
           <form class="checkout" data-checkout-form hidden novalidate>
             <h2>How would you like it?</h2>
 
@@ -214,7 +218,7 @@
 
             <button class="btn btn--gold btn--block" type="submit" data-pay>Pay with Square</button>
             <p class="pay-msg" data-pay-message role="status"></p>
-            <p class="pay-fine">
+            <p class="pay-fine" data-pay-fine>
               Payment is taken on Square&rsquo;s own secure page. Sales tax is worked out there from our
               store&rsquo;s tax settings, and any shipping charge is added by us before you pay. We never
               see your card details, and this page cannot tell you a payment succeeded &mdash; Square&rsquo;s

@@ -737,10 +737,43 @@ The only thing to set is the API base, at the top of `js/store-api.js`:
 
 ```js
 var API_BASE = window.ASP_API_BASE ||
-  'https://n9ecaydkv4.execute-api.us-east-1.amazonaws.com/default';
+  'https://uf04sxkrfk.execute-api.us-east-1.amazonaws.com/default';
 ```
 
-Point it at the production API when you cut over.
+That is the production API, so the live site shows the production catalog:
+844 products, real Square prices and stock, rebuilt every 15 minutes by the
+scheduled job in §5a. `window.ASP_API_BASE` still overrides it, which is how
+the test suite points the same files at a local stand-in.
+
+### What the site does while fulfillment is off
+
+The pages ask `GET /config` and believe the answer. With `PICKUP_ENABLED` and
+`SHIPPING_ENABLED` both off — which is how production runs today — the site
+goes into a browse-only state on its own:
+
+| Where | What it does |
+| --- | --- |
+| Shop page | a notice above the grid saying ordering is not open, products and prices unchanged |
+| Product picker | **Buy Now** is not rendered; **Add to Cart** stays; the fine print says the cart is a list |
+| Cart page | the whole checkout form, the address fields and the Pay button are not rendered; the notice carries `storePhone` from `/config` |
+| Cart total | "Subtotal only. Tax is added in store" — no mention of shipping or a payment page |
+
+Nothing about this is hardcoded. Switch a method on in the Lambda's
+environment and the next page load has a checkout again, with no site deploy.
+A browser already sitting on the page keeps the state it loaded with until it
+is reloaded, which is also what happens today when a method is switched off.
+
+### Keeping a long-open tab honest
+
+The catalog is a snapshot, so a tab left open all afternoon is showing an
+afternoon-old shop. Returning to the tab (`visibilitychange`, and `pageshow`
+for the Back button) re-fetches the catalog if what is on screen is more than
+a minute old — quietly: no loading skeleton, no scroll jump, filters and
+search kept, and the cart untouched. The cart page does the same with
+`POST /cart/validate`, so prices and stock are re-checked against Square's
+snapshot without clearing anything the customer put in it. A failed background
+refresh leaves what is on screen alone rather than replacing a working page
+with an error.
 
 ---
 

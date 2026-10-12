@@ -20,7 +20,7 @@
   var money = ASP.money;
   var state = {
     products: [], categories: [], q: '', category: 'all',
-    sort: 'name-asc', loaded: false, meta: null, shown: 60
+    sort: 'name-asc', loaded: false, meta: null, shown: 60, loadedAt: 0
   };
 
   var els = {
@@ -37,7 +37,8 @@
     activeFilters: document.querySelector('[data-active-filters]'),
     clearButtons: document.querySelectorAll('[data-clear-filters]'),
     filterBtn: document.querySelector('[data-filter-open]'),
-    drawer: document.querySelector('[data-drawer]')
+    drawer: document.querySelector('[data-drawer]'),
+    ordering: document.querySelector('[data-ordering-notice]')
   };
 
   function h(tag, cls, text) {
@@ -45,6 +46,38 @@
     if (cls) n.className = cls;
     if (text != null) n.textContent = text;
     return n;
+  }
+
+  /* --------------------------------------------- what the shop can do */
+
+  /* Checkout is only as open as the API says it is. Both fulfillment methods
+     are off in production today, so there is no way to complete an order
+     online — and the page says that plainly rather than leading somebody
+     through a form that cannot finish. The day pickup or shipping is
+     switched on in AWS, /config starts saying so and this all turns itself
+     back on with no change here. */
+  function applyConfig(config) {
+    var f = (config && config.fulfillment) || {};
+    var open = !!((f.pickup && f.pickup.available) || (f.shipping && f.shipping.available));
+    ASP.ordering = { open: open, phone: (config && config.storePhone) || null };
+
+    if (!els.ordering) return;
+    els.ordering.innerHTML = '';
+    els.ordering.hidden = open;
+    if (open) return;
+
+    els.ordering.appendChild(h('b', null, 'Online ordering is not open yet'));
+    els.ordering.appendChild(h('span', null,
+      'Everything below is live from our store system — real prices, real sizes, ' +
+      'real stock. You cannot check out online yet, so the cart here is a list ' +
+      'you can bring in or read to us. Nothing is held until you buy it in store.'));
+    if (ASP.ordering.phone) {
+      var a = document.createElement('a');
+      a.className = 'btn btn--ghost btn--sm';
+      a.href = 'tel:' + ASP.ordering.phone.replace(/[^+\d]/g, '');
+      a.textContent = 'Call the store';
+      els.ordering.appendChild(a);
+    }
   }
 
   /* ----------------------------------------------------------- loading */
@@ -118,11 +151,48 @@
     }
   }
 
+  /* Square's names carry whatever whitespace somebody typed into the point
+     of sale. Trimming here keeps the cards and the A-to-Z sort tidy without
+     pretending the catalog says something it does not. */
+  function tidy(products) {
+    products.forEach(function (p) {
+      if (typeof p.name === 'string') p.name = p.name.trim();
+      if (typeof p.description === 'string') p.description = p.description.trim();
+    });
+    return products;
+  }
+
+  function adopt(result) {
+    state.products = tidy(result.products);
+    state.meta = result.meta;
+    state.loadedAt = Date.now();
+    if (result.meta && result.meta.categories && result.meta.categories.length) {
+      state.categories = result.meta.categories;
+    }
+  }
+
+  function staleNote(meta) {
+    setStatus('warn', 'Last updated ' + describeAge(meta.ageSeconds),
+      ASP.ordering && ASP.ordering.open
+        ? 'Prices and stock are checked again at checkout.'
+        : 'The list is rebuilt from the store system every few minutes.',
+      load);
+  }
+
   function load() {
     stopWarming();
     clearStatus();
     skeleton(8);
     if (els.count) els.count.textContent = 'Loading the shop…';
+
+    /* Asked for alongside the catalog rather than after it, so the page never
+       shows a buyable-looking shop for a moment before admitting it is not.
+       A failure here is not fatal: the catalog still draws, and the picker
+       treats an unknown state as closed. */
+    ASP.api.configOnce().then(applyConfig, function (err) {
+      if (window.console) console.warn('[shop] could not read /config', err && err.message);
+      ASP.ordering = { open: false, phone: null };
+    });
 
     ASP.api.catalog(function (progress) {
       /* The product list was rebuilt while we were paging through it, so the
@@ -136,12 +206,13 @@
         if (els.count) els.count.textContent = 'The shop was just updated. Loading it again…';
         return;
       }
-      state.products = progress.products;
+      state.products = tidy(progress.products);
       state.meta = progress.meta;
       if (!state.loaded) {
         state.loaded = true;
         state.categories = progress.meta.categories;
         buildChips();
+        applyDeepLink();
       }
       render();
       if (!progress.done && els.count) {
@@ -149,15 +220,12 @@
       }
     }).then(function (result) {
       warmAttempts = 0;
-      state.products = result.products;
-      state.meta = result.meta;
+      adopt(result);
       render();
       if (result.meta.stale) {
         /* Not an error. The product list is rebuilt on a schedule, so it can
-           be a little behind; prices and stock are read from the store system
-           again before anybody pays. */
-        setStatus('warn', 'Last updated ' + describeAge(result.meta.ageSeconds),
-          'Prices and stock are checked again at checkout.', load);
+           be a little behind. */
+        staleNote(result.meta);
       }
     }).catch(function (err) {
       if (err.code === 'CATALOG_WARMING' || err.code === 'CATALOG_UNAVAILABLE') {
@@ -169,6 +237,80 @@
       if (els.count) els.count.textContent = '';
       setStatus('error', 'The shop would not load', err.message, load);
     });
+  }
+
+  /* ------------------------------------------- coming back to the tab */
+
+  /* The catalog is rebuilt on a schedule, so a tab left open for an hour is
+     showing an hour-old shop. Coming back to it fetches the list again in
+     the background: no skeleton, no scroll jump, and the filters, the search
+     and the cart are left exactly as they were — the cart lives in
+     localStorage and nothing here writes to it. */
+  var REVISIT_AFTER_MS = 60000;
+  var refreshing = false;
+
+  function refreshQuietly() {
+    if (refreshing || !state.loaded) return;
+    if (Date.now() - state.loadedAt < REVISIT_AFTER_MS) return;
+    /* Not while somebody is choosing a size: replacing the catalog under an
+       open picker would move the ground beneath them. */
+    if (document.querySelector('.pick:not([hidden])')) return;
+
+    refreshing = true;
+    var wasBuild = state.meta && state.meta.buildId;
+
+    ASP.api.catalog(null).then(function (result) {
+      refreshing = false;
+      var changed = !wasBuild || (result.meta && result.meta.buildId !== wasBuild);
+      adopt(result);
+      /* Redraw either way — stock moves within a build's lifetime too — but
+         only mention it when the shop really is a different list. */
+      render();
+      if (result.meta.stale) staleNote(result.meta);
+      else if (changed) clearStatus();
+    }).catch(function (err) {
+      refreshing = false;
+      /* Whatever is on screen was true a few minutes ago, which beats
+         replacing a working shop with an error because a background refresh
+         did not land. The next visit tries again. */
+      if (window.console) console.warn('[shop] background refresh failed', err && err.message);
+    });
+  }
+
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible') refreshQuietly();
+  });
+  /* Coming back with the browser's Back button, where the page is restored
+     from cache and visibilitychange never fires. */
+  window.addEventListener('pageshow', function (e) { if (e.persisted) refreshQuietly(); });
+
+  /* ------------------------------------------------------- deep links */
+
+  var slug = function (text) {
+    return String(text || '').toLowerCase().replace(/&/g, ' and ')
+      .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  };
+
+  /* The home page tiles link to shop.html?category=hats. Categories come from
+     Square and the shop renames them whenever it likes, so the link is
+     matched against the live names rather than a list kept in here. A link
+     that matches nothing becomes a search, which is a better answer than
+     silently showing all 844 products. */
+  function applyDeepLink() {
+    var params;
+    try { params = new URLSearchParams(window.location.search); } catch (e) { return; }
+    var wanted = params.get('category');
+    var query = params.get('q');
+
+    if (wanted) {
+      var match = state.categories.find(function (c) { return slug(c.name) === slug(wanted); });
+      if (match) state.category = match.id;
+      else if (!query) query = wanted.replace(/-/g, ' ');
+    }
+    if (query) {
+      state.q = query;
+      if (els.search) els.search.value = query;
+    }
   }
 
   /* ------------------------------------------------------------- filters */
@@ -253,10 +395,12 @@
          placeholder rather than a broken image icon. */
       img.addEventListener('error', function () {
         img.remove();
+        media.classList.add('card__media--empty');
         media.appendChild(placeholder());
       });
       media.appendChild(img);
     } else {
+      media.classList.add('card__media--empty');
       media.appendChild(placeholder());
     }
     var stock = stockLabel(p);

@@ -106,6 +106,15 @@ order.html   what Square decided   -> js/order-page.js
   (`backend/DEPLOY.md` §9c), because a silent release is the one failure
   nobody would ever find. What this still does *not* cover — a sale over the
   counter — is written down in §9 rather than glossed over.
+- **The site only offers what the API says it can do.** `GET /config` decides
+  whether there is a checkout at all. With pickup and shipping both switched
+  off, as production runs today, there is no Buy Now, no checkout form and no
+  Pay button anywhere — the cart is a list to bring into the store, and the
+  page says that in those words. Switching a method on in AWS brings the
+  checkout back with no change here.
+- **A tab left open gets refreshed, not trusted.** Coming back to the page
+  re-fetches the catalog if it is more than a minute old, quietly, keeping
+  the filters, the search and the cart exactly as they were.
 - **Buy Now never empties your cart**, even when you buy something that is
   already in it.
 - **Nothing is promised that is not built.** No UPS rates, no tracking numbers,
@@ -129,8 +138,13 @@ One line, at the top of `js/store-api.js`:
 
 ```js
 var API_BASE = window.ASP_API_BASE ||
-  'https://n9ecaydkv4.execute-api.us-east-1.amazonaws.com/default';
+  'https://uf04sxkrfk.execute-api.us-east-1.amazonaws.com/default';
 ```
+
+That is the production API: 844 products with live Square prices and stock.
+Online ordering is not switched on — `GET /config` reports no pickup and no
+shipping, and the site reads that answer and says so rather than offering a
+checkout that cannot finish.
 
 ### The back end
 

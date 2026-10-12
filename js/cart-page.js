@@ -36,16 +36,29 @@
     pickupNote: root.querySelector('[data-pickup-note]'),
     pay: root.querySelector('[data-pay]'),
     payMsg: root.querySelector('[data-pay-message]'),
+    ordering: root.querySelector('[data-ordering-notice]'),
     mode: root.querySelector('[data-cart-mode]')
   };
 
-  var state = { cart: null, config: null, busy: false, method: null };
+  var state = { cart: null, config: null, busy: false, method: null, loadedAt: 0 };
 
   function h(tag, cls, text) {
     var n = document.createElement(tag);
     if (cls) n.className = cls;
     if (text != null) n.textContent = text;
     return n;
+  }
+
+  /* Names come from the point of sale with whatever spacing somebody typed.
+     Trimmed for display only; nothing else about the line is touched. */
+  function tidy(cart) {
+    if (cart && cart.lines) {
+      cart.lines.forEach(function (l) {
+        if (typeof l.productName === 'string') l.productName = l.productName.trim();
+        if (typeof l.variationName === 'string') l.variationName = l.variationName.trim();
+      });
+    }
+    return cart;
   }
 
   function linesForRequest() {
@@ -84,10 +97,12 @@
 
     Promise.all([
       ASP.api.validateCart(lines),
-      state.config ? Promise.resolve({ config: state.config }) : ASP.api.config()
+      state.config ? Promise.resolve(state.config) : ASP.api.configOnce()
     ]).then(function (results) {
-      state.cart = results[0].cart;
-      state.config = results[1].config;
+      state.cart = tidy(results[0].cart);
+      state.config = results[1];
+      state.loadedAt = Date.now();
+      applyConfig();
       clearStatus();
       renderLines();
       renderNotices();
@@ -112,6 +127,44 @@
     }
   }
   function clearStatus() { if (els.status) els.status.hidden = true; }
+
+  /* ------------------------------------------- coming back to the tab */
+
+  /* Somebody leaves this tab open, somebody else buys the last one in the
+     store, and they come back an hour later. Returning re-checks the same
+     lines against the live catalog — quietly, without blanking the list and
+     without touching what is in the cart: this only reads localStorage and
+     asks the API what those ids are worth now. */
+  var REVISIT_AFTER_MS = 60000;
+  var revisiting = false;
+
+  function refreshQuietly() {
+    if (revisiting || state.busy || !state.cart) return;
+    if (Date.now() - state.loadedAt < REVISIT_AFTER_MS) return;
+    var lines = linesForRequest();
+    if (!lines.length) return;
+
+    revisiting = true;
+    ASP.api.validateCart(lines).then(function (data) {
+      revisiting = false;
+      state.cart = tidy(data.cart);
+      state.loadedAt = Date.now();
+      renderLines();
+      renderNotices();
+      renderForm();
+    }).catch(function (err) {
+      revisiting = false;
+      /* The cart is still whatever the customer put in it, it was checked a
+         few minutes ago, and it is checked again before anybody can pay.
+         Replacing a working page with an error would be the worse answer. */
+      if (window.console) console.warn('[cart] background re-check failed', err && err.message);
+    });
+  }
+
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible') refreshQuietly();
+  });
+  window.addEventListener('pageshow', function (e) { if (e.persisted) refreshQuietly(); });
 
   /* -------------------------------------------------------------- lines */
 
@@ -142,9 +195,12 @@
     row.appendChild(h('span', null, 'Subtotal (' + t.itemCount + ' item' + (t.itemCount === 1 ? '' : 's') + ')'));
     row.appendChild(h('b', null, money(t.subtotal, t.currency)));
     els.summary.appendChild(row);
-    /* Said plainly rather than shown as a zero. */
+    /* Said plainly rather than shown as a zero — and only promised while
+       there is a checkout to promise it about. */
     els.summary.appendChild(h('p', 'sum__note',
-      'Shipping is added when you choose it below. Sales tax is worked out by Square on the payment page.'));
+      ASP.ordering && ASP.ordering.open
+        ? 'Shipping is added when you choose it below. Sales tax is worked out by Square on the payment page.'
+        : 'Subtotal only. Tax is added in store when you buy, and this total is not an order.'));
   }
 
   function lineRow(line) {
@@ -249,25 +305,45 @@
 
   /* --------------------------------------------------------------- form */
 
+  /* What the shop can do right now, settled before anything is drawn so that
+     every part of the page tells the same story. */
+  function applyConfig() {
+    var f = (state.config && state.config.fulfillment) || {};
+    ASP.ordering = {
+      open: !!((f.pickup && f.pickup.available) || (f.shipping && f.shipping.available)),
+      phone: (state.config && state.config.storePhone) || null
+    };
+  }
+
+  function methodsAvailable() {
+    var f = state.config.fulfillment;
+    var available = [];
+    if (f.pickup.available) available.push(['pickup', 'Collect from the store', f.pickup.address]);
+    if (f.shipping.available) available.push(['shipping', 'Ship it to me', 'Parcel delivery by carrier']);
+    return available;
+  }
+
   function renderForm() {
+    var available = methodsAvailable();
+
+    /* Nothing can be bought online until a fulfillment method is switched on
+       in AWS. The old version of this left the whole form up with the Pay
+       button greyed out, which reads as "nearly there" — somebody fills in
+       their address and phone number before finding out. So the form is not
+       shown at all, and the cart stands on its own as a list. */
+    if (!available.length) {
+      els.form.hidden = true;
+      renderClosedNotice();
+      return;
+    }
+    if (els.ordering) { els.ordering.hidden = true; els.ordering.innerHTML = ''; }
+
     if (!state.cart.payableLines.length) {
       els.form.hidden = true;
       return;
     }
     els.form.hidden = false;
-    var f = state.config.fulfillment;
-
     els.methods.innerHTML = '';
-    var available = [];
-    if (f.pickup.available) available.push(['pickup', 'Collect from the store', f.pickup.address]);
-    if (f.shipping.available) available.push(['shipping', 'Ship it to me', 'Parcel delivery by carrier']);
-
-    if (!available.length) {
-      els.methods.appendChild(notice('error', 'Online ordering is not open yet',
-        'Neither pickup nor shipping has been switched on. Call ' + (state.config.storePhone || 'the store') + ' to buy these.'));
-      els.pay.disabled = true;
-      return;
-    }
 
     available.forEach(function (opt) {
       var id = 'ff-' + opt[0];
@@ -286,6 +362,31 @@
     });
 
     syncMethod();
+  }
+
+  function renderClosedNotice() {
+    if (!els.ordering) return;
+    els.ordering.innerHTML = '';
+    els.ordering.hidden = false;
+    els.ordering.appendChild(h('b', null, 'Online ordering is not open yet'));
+    els.ordering.appendChild(h('span', null,
+      'Neither collection nor shipping has been switched on, so there is no way ' +
+      'to pay for this online. The list above is live from our store system — ' +
+      'bring it in or read it to us over the phone, and we will put it together. ' +
+      'Nothing here is held for you until you buy it.'));
+    var phone = state.config.storePhone;
+    if (phone) {
+      var a = document.createElement('a');
+      a.className = 'btn btn--gold btn--sm';
+      a.href = 'tel:' + String(phone).replace(/[^+\d]/g, '');
+      a.textContent = 'Call ' + formatPhone(phone);
+      els.ordering.appendChild(a);
+    }
+  }
+
+  function formatPhone(raw) {
+    var d = String(raw).replace(/\D/g, '').replace(/^1/, '');
+    return d.length === 10 ? '(' + d.slice(0, 3) + ') ' + d.slice(3, 6) + '-' + d.slice(6) : String(raw);
   }
 
   function syncMethod() {

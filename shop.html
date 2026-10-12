@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Browse the Catalog | All Star Players, Queens</title>
-<meta name="description" content="Shop All Star Players online. Streetwear, sneakers, hats and accessories from our Queens store, with collection in store or shipping to your door.">
+<meta name="description" content="Browse the All Star Players floor online. Streetwear, sneakers, hats and accessories from our Queens store, with live prices and stock straight from our store system.">
 <meta name="theme-color" content="#0A0A0A">
 <meta name="author" content="All Star Players">
 
@@ -141,7 +141,7 @@
           <p class="eyebrow" style="margin-bottom:16px">Shop online</p>
           <h1 id="shop-title" class="foil" data-foil>Shop the Floor</h1>
         </div>
-        <p>Tees, fleece, bottoms, sneakers, hats and the small stuff. Prices and stock come straight from the store system, and you can collect in store or have it shipped.</p>
+        <p>Tees, fleece, bottoms, sneakers, hats and the small stuff. Prices, sizes and stock come straight from our store system, so what you see here is what is on the floor.</p>
       </div>
     </div>
   </section>
@@ -214,6 +214,11 @@
 
     <!-- Loading, stale-cache and failure states are written here by js/store.js. -->
     <div class="catalog-status" data-catalog-status hidden></div>
+
+    <!-- What the shop can actually do right now, from GET /config. Written by
+         js/store.js; never hardcoded, so it changes the day pickup or
+         shipping is switched on in AWS. -->
+    <div class="ordering-notice" data-ordering-notice hidden></div>
 
     <!-- Drawn by js/store.js from GET /catalog on our AWS API. Nothing is hardcoded. -->
     <div class="product-grid" data-shop-grid></div>

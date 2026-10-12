@@ -11,10 +11,16 @@
 (function () {
   'use strict';
 
+  /* The production API. 844 products, real Square prices and stock, rebuilt
+     by a scheduled job every 15 minutes. There is no credential here and
+     there never can be: the token lives in AWS Secrets Manager, and this
+     file only ever sends ids, quantities and what the customer typed. */
   var API_BASE = window.ASP_API_BASE ||
-    'https://n9ecaydkv4.execute-api.us-east-1.amazonaws.com/default';
+    'https://uf04sxkrfk.execute-api.us-east-1.amazonaws.com/default';
 
   var ASP = window.ASP || (window.ASP = {});
+
+  var configPromise = null;
 
   function request(path, options) {
     var opts = options || {};
@@ -107,6 +113,21 @@
   ASP.api = {
     base: API_BASE,
     config: function () { return request('/config'); },
+    /* What the shop is able to do right now — which fulfillment methods are
+       switched on, the phone number, the cart limits. Asked once per page
+       load and shared, because several pieces of the page need it and the
+       answer cannot change between them. */
+    configOnce: function () {
+      if (!configPromise) {
+        configPromise = request('/config').then(function (data) {
+          if (!data || data.success !== true || !data.config) {
+            throw new Error('The shop could not tell us what it can do right now.');
+          }
+          return data.config;
+        }, function (err) { configPromise = null; throw err; });
+      }
+      return configPromise;
+    },
     catalog: fetchCatalog,
     validateCart: function (lines) {
       return request('/cart/validate', { method: 'POST', body: { lines: lines } });
