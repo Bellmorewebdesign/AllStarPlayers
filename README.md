@@ -3,12 +3,14 @@
 The website for **All Star Players**, a streetwear boutique at 96-03 37th Ave, Queens, NY 11368,
 open since 2002.
 
-Two static pages. No build step, no framework, no dependencies.
+Four static pages. No build step, no framework, no front-end dependencies.
 
 | Page | File | What it is |
 | --- | --- | --- |
 | Home | `index.html` | Video header, what is on the floor, categories, the store, shop photos, authenticity, visit |
-| Shop | `shop.html` | In-stock snapshot, search, categories, prices and variation details |
+| Shop | `shop.html` | The live catalog from Square, with size and colour selection and a cart |
+| Cart | `cart.html` | The cart, the delivery choice and the hand-off to Square |
+| Order | `order.html` | Where Square sends people back, with a server-verified status |
 
 ---
 
@@ -35,80 +37,103 @@ of `tools/build-media.sh` so the loop still turns over cleanly.
 
 ---
 
-## In-stock browsing catalog
+## The online store
 
-`shop.html` loads `js/stock-products.js`, a public snapshot of the October 11, 2026
-Square export for ALLSTAR PLAYERS: **870 product-name groups and 1,786 sellable
-variations with positive stock**. Two additional positive-stock variations were explicitly
-marked not sellable and are excluded. Zero, negative, blank and unknown quantities are
-excluded. A group can include only its in-stock sizes/colors; other variations do not appear.
+The shop page is a real storefront. Products, prices, photographs and stock all
+come from the shop's Square account, live, through an API of our own on AWS.
+Customers can put things in a cart and pay on Square's hosted checkout,
+collecting in store or having it shipped.
 
-This is **browsing only**, not live Square inventory. The page and product dialogs show the
-snapshot date and ask customers to call to confirm stock. There is no cart or checkout on
-these real product cards. The separate sandbox checkout preview still uses the existing AWS
-API and test item. This change requires no Lambda deployment.
+**There is no product data in this repository, and there must never be any.**
+No spreadsheet, no export, no snapshot. If the API cannot be reached, the shop
+page says so and offers to try again; it never shows a saved copy as though it
+were current.
 
-The shop supports search (names, descriptions and available options), category filters,
-name/price sorting, 36 cards at a time with Show More, and a keyboard-accessible details
-dialog containing the exported variation choices and their own prices. Prices in this
-static file are **USD dollars**, not Square API cents. A variable price appears as “Ask in
-store”; mixed known and variable prices show “From” on the card. No dates were present in
-the export, so Newest/New Arrivals are not offered.
+### How it fits together
 
-### Refreshing the snapshot
+```
+shop.html    the grid              -> js/store.js + js/picker.js
+cart.html    cart and checkout     -> js/cart-page.js
+order.html   what Square decided   -> js/order-page.js
+                      |
+   js/store-api.js  --- the only place that knows the API URL
+   js/cart.js       --- ids and quantities in localStorage, nothing else
+                      |
+            AWS Lambda  (backend/)
+                      |
+     Secrets Manager + DynamoDB + the Square API
+```
 
-Keep the original export outside this repository. It contains supplier costs and other
-internal data and must not be published. The importer reads it without editing it and
-writes only a whitelist of public retail fields. It does not copy vendor names, unit costs,
-SKUs, exact quantities, merchant credentials or account details into the website.
+### The rules this follows
 
-From the repository root, using Python with `openpyxl` installed:
+- **The browser is never trusted with money.** It sends variation ids,
+  quantities and the customer's own details. Prices come from Square's catalog,
+  the shipping charge from the shop's configured zones, and tax from the shop's
+  own Square tax rules. A price edited in localStorage changes nothing.
+- **Only ids and quantities are stored locally.** Anything else goes stale, and
+  a stale price in storage is exactly what an attacker would like to edit.
+- **Unknown stock is not unlimited stock.** A variation Square is not counting
+  reads "availability unknown", and by default cannot be bought online at all.
+- **A variable-price item never gets an invented price.** It is not sold
+  online; the card says it is priced in store.
+- **A payment link is not a payment.** Neither is a redirect. The order page
+  asks our API, which asks Square, and says "checking" until it knows.
+- **Nothing is promised that is not built.** No UPS rates, no tracking numbers,
+  no automated pickup email, no guaranteed stock reservation. Where a
+  limitation exists, the page says so.
+
+### The cart
+
+`js/cart.js` keeps `{variationId, quantity}` pairs in `localStorage` under
+`asp.cart.v1`. Adding the same variation twice makes one line of two; two sizes
+of the same shirt are two lines. The cart survives a refresh and is shared
+between tabs. It is reconciled against the API every time it is displayed, and
+again before payment.
+
+"Buy now" is a one-item checkout kept in `sessionStorage`. It deliberately does
+not touch the saved cart.
+
+### Changing where the API lives
+
+One line, at the top of `js/store-api.js`:
+
+```js
+var API_BASE = window.ASP_API_BASE ||
+  'https://n9ecaydkv4.execute-api.us-east-1.amazonaws.com/default';
+```
+
+### The back end
+
+`backend/` is one AWS Lambda. `backend/DEPLOY.md` is the run-book: the table,
+the secrets, the IAM policy, the routes, CORS, webhooks, and the sandbox checks
+to do before taking real money. Read it before touching the console.
+
+```
+backend/
+  index.mjs            routing and the request handlers
+  lib/config.mjs       secrets and settings; an unconfigured method is unavailable
+  lib/square.mjs       the Square client, with retries and cursor walking
+  lib/catalog.mjs      catalog + inventory -> what can actually be sold
+  lib/store.mjs        DynamoDB: cache, idempotency, orders, holds, webhook de-dup
+  lib/cart.mjs         reconciling a cart against live prices and stock
+  lib/fulfillment.mjs  pickup and shipping validation, configured rates
+  lib/checkout.mjs     building the Square order and the payment link
+  lib/webhook.mjs      signature verification and event interpretation
+  test/                78 checks against a fake Square and an in-memory DynamoDB
+```
 
 ```bash
-python tools/import-square-catalog.py /path/to/catalog.xlsx --date 2026-10-11
-python -m unittest discover -s tools -p 'test_*.py'
+cd backend && npm install && npm test
 ```
 
-Use the actual export date, and `--location "LOCATION NAME"` if the stock-column suffix
-changes. Then update the date/product-count notice in `shop.html` and commit the generated
-`js/stock-products.js`. Do not edit that generated file directly. Sorting/grouping uses the
-trimmed Item Name because the export has variation IDs, not parent item IDs. These website
-group IDs are not Square catalog IDs. Each variation keeps its real catalog variation ID
-for a future production integration; never submit these to the sandbox checkout endpoint.
+### What the shop still has to supply
 
-The importer maps the export's categories into the filter groups and inherits categories
-from other rows of the same item when a size row is blank. Unmapped/uncategorized items go
-under Other. Review Other when refreshing; add mappings in `CATEGORY_GROUPS` as needed.
-Existing home-page category links still work.
-
-### Adding real product photos
-
-The export has no photos. Cards honestly say “Photo coming soon”; no rack or stock photo
-is presented as a photograph of a specific product. Add a verified product photo under
-`assets/img/products/`, find its stable `stock-...` ID in `js/stock-products.js`, and add it
-to `data/catalog-images.json`:
-
-```json
-{
-  "stock-REPLACE_WITH_PRODUCT_ID": {
-    "image": "assets/img/products/verified-product.jpg",
-    "alt": "Description of the actual product photograph"
-  }
-}
-```
-
-Run the importer again with the same export and date. It checks that each mapped photo is
-an existing product asset. Do not guess photo-to-product matches. Production Square
-Catalog image retrieval and live stock sync are follow-up work requiring the client's
-production credentials and location. Before enabling real checkout, stock and price must
-be verified on the server at order time.
-
-### Homepage floor photos
-
-`js/products.js` still holds the fourteen verified store/rack photos used on `index.html`.
-The shop overrides that array with the snapshot, so these photographs are not confused
-with real product listings. Edit homepage photos in `products.js` as before. Their existing
-“Photos, not listings” notice remains.
+Listed in full at the top of `backend/DEPLOY.md`: the production token and
+location, the webhook signature key, the shipping zones and rates, the pickup
+address and policy, a decision on items Square is not counting, and a check
+that the Square tax rules cover online orders. **Any fulfillment method that is
+not configured is simply not offered.** Nothing falls back to free shipping or
+to no tax.
 
 ---
 
@@ -143,35 +168,38 @@ To move a crop, edit its one line in the `make` table and rerun.
 
 ```
 index.html              Home
-shop.html               Shop
+shop.html               Shop, the live catalog
+cart.html               Cart and checkout
+order.html              Order status after Square sends people back
 css/
   base.css              Tokens, type, header, footer, buttons, motion
-  catalog.css           Cards, badges, the grid, the "photos not listings" note
+  catalog.css           Cards, badges, the grid
   home.css              The video header and every section on the home page
   shop.css              Shop header, filters, sorting, the phone drawer
-  test-checkout.css     The Square sandbox test block on the shop page
+  store.css             Cart button, stock labels, the picker, cart and order pages
 js/
-  products.js           Homepage floor photographs and shared settings
-  stock-products.js     Generated public in-stock inventory snapshot
-  stock-catalog.js      Browsing-only variation details dialog
-  catalog.js            Draws the cards, runs search, filters and sorting
-  main.js               Sticky header, phone menu, scroll reveals, the video
-  test-checkout.js      Fetches the one sandbox product and runs its Buy button
-backend/
-  index.mjs             The AWS Lambda behind both API endpoints
-  DEPLOY.md             <- how to get it on AWS. Read this before touching AWS.
+  store-api.js          the only file that knows the API URL
+  cart.js               the cart: ids and quantities, the badge, buy-now
+  store.js              the shop grid, search and category filters
+  picker.js             the size and colour dialog
+  cart-page.js          the cart page and the checkout form
+  order-page.js         the server-verified order status page
+  products.js           floor photographs for the home page row (not listings)
+  catalog.js            draws those home page cards
+  main.js               sticky header, phone menu, scroll reveals, the video
 tools/
-  build-media.sh        Regenerates store assets from the originals
-  import-square-catalog.py  Generates the public retail snapshot from a private export
-  test_import_square_catalog.py  Import selection/privacy checks
-data/
-  catalog-images.json   Verified product-photo mappings
+  build-media.sh        Regenerates assets/img and assets/video from the originals
+backend/
+  index.mjs             The store API Lambda
+  lib/                  Its modules
+  test/                 Its tests
+  DEPLOY.md             <- read this before touching AWS
 assets/
   brand/                Vector logo, favicons, web manifest, social share image
   fonts/                Self-hosted Boldonse + Instrument Sans (SIL OFL, licences included)
   img/                  Generated WebP + JPEG crops used across the site
   img/originals/        The six original photographs, untouched
-  img/products/         Product artwork. Only the sandbox test placeholder so far.
+                        (product photos come from Square, not from here)
   video/                The two encoded MP4s
   video/originals/      The original store clip, untouched
 ```
@@ -210,98 +238,11 @@ Three notes for whoever edits next:
 - There are **no store hours and no email address** anywhere on the site, because none were
   given. When they arrive, add hours to the Visit block in `index.html` and to the
   `openingHoursSpecification` of the `ClothingStore` JSON-LD block in the `<head>`.
-- Nothing in `js/products.js` quotes a price, and none of those cards offers to sell anything,
-  because those are homepage rack photographs. The shop's `js/stock-products.js` quotes
-  real exported retail prices but remains browsing-only with a call-the-store action.
-  The separate Square sandbox preview is the only checkout integration. See below.
+- The home page row is **photographs of the racks**, from `js/products.js`. They are not
+  listings and carry no price. Everything that is actually for sale is on the shop page
+  and comes from Square.
 
 ---
-
-## The Square sandbox test
-
-The expandable sandbox section below the catalog opens a Square **sandbox hosted checkout preview** for one test product.
-Choose **Ship to me** or **Store pickup** before opening Square. Shipping collects
-an address; pickup creates a `PICKUP` fulfillment at the sandbox location. The
-preview cannot accept payments; nothing ships and no pickup is booked. Pickup
-says “We’ll notify you when your order is ready. Collect during store hours.”
-There is no fixed pickup estimate or appointment. Ready notifications are not
-automated: staff must contact buyers when orders are ready before this policy is
-used in production. Sandbox previews send no messages. Shipping charges, carrier rates, labels and
-delivery estimates are not configured. Confirm shipping areas/rates and pickup
-location/hours/readiness with the client before preparing production checkout.
-
-### How it hangs together
-
-```
-shop.html  #test-checkout          the block, and the ids it reads
-  -> js/test-checkout.js           draws it, runs the button
-     -> GET  <api>/default/products   what to show and what it costs
-     -> POST <api>/default/checkout   asks Square for a checkout page
-        -> backend/index.mjs (AWS Lambda)
-           -> Secrets Manager     the Square token, which never leaves AWS
-           -> Square sandbox      creates the payment link
-     -> the browser goes to Square's own hosted checkout page
-```
-
-**No Square token is anywhere in this repository, and there must never be one.** The static
-site only ever talks to our own AWS endpoints. Everything secret lives in the AWS secret
-`all-star-players/square/sandbox`.
-
-### The rules it plays by
-
-- The price comes from Square, in cents, and is formatted in the browser. The browser never
-  sends a price, and the backend would ignore it if it did.
-- Only the one test variation, only one unit. Anything else is refused before Square is called.
-- If the API is down the block says so. It never falls back to invented product data.
-- Nothing on the page ever says a payment succeeded. A payment link is not a payment, and a
-  redirect is not a payment. Square's own confirmation page is what tells you.
-- Hosted sandbox payment links are previews with disabled payment fields. Do not try to
-  complete a test-card payment on this preview. Link creation does not verify payment.
-- Shipping-address collection is enabled only for shipping. Pickup uses an explicit
-  Square `PICKUP` fulfillment with shipping-address collection disabled.
-- No `shipping_fee` is sent while rates are undecided; this is not a free-shipping policy.
-- Retries preserve the key per fulfillment mode; changing modes cannot reuse a link
-  for the other mode. The frontend verifies the backend confirms the chosen mode
-  and the notify-when-ready pickup policy.
-
-### The picture
-
-`assets/img/products/test-sneaker.svg` is a **drawing**, not a photograph — an original
-illustration in the site's own black, bone and gold, made for this repository, so there is no
-stock licence to worry about. The caption under it says as much.
-
-To swap in a real photograph: drop it in `assets/img/products/`, then point the block at it by
-editing one attribute in `shop.html`:
-
-```html
-data-image="assets/img/products/your-photo.jpg"
-data-image-alt="What the photograph shows"
-```
-
-Nothing else needs to change. If you buy or licence a stock photo, keep the licence file next
-to it the way the fonts do.
-
-### Changing the endpoints
-
-The API base URL and the two Square ids are attributes on the block in `shop.html`, not
-constants buried in the JavaScript:
-
-```html
-data-api="https://n9ecaydkv4.execute-api.us-east-1.amazonaws.com/default"
-data-item="E5LVW7ULD463KVCQKLV7SN63"
-data-variation="T2APLGR5UFWGFELNUHGVNVI2"
-```
-
-### Taking it off the site
-
-Delete the `<section id="test-checkout">` block from `shop.html`. The two file references in
-the `<head>` and before `</body>` can go with it. Nothing else on the site depends on it.
-
-### The AWS side
-
-`backend/index.mjs` is the whole function and `backend/DEPLOY.md` is the runbook: replacing the
-code, adding the `POST /checkout` route, checking the Lambda invoke permission, turning on
-CORS, and checking both pickup and shipping previews. Read it before touching the console.
 
 ## Publishing on GitHub Pages
 

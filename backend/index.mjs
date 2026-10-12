@@ -1,368 +1,469 @@
 /* ==========================================================================
-   All Star Players / Square API Lambda
+   All Star Players / store API
    --------------------------------------------------------------------------
-   One function behind the HTTP API `n9ecaydkv4`, stage `default`.
+   One AWS Lambda behind an HTTP API. Everything the storefront needs, and
+   nothing it could use to cheat.
 
-     GET  /products   the sandbox catalog, prices in cents, no credentials
-     POST /checkout   creates a Square-hosted sandbox checkout page and hands
-                      back its URL
+     GET  /config            what the shop offers: pickup, shipping zones, limits
+     GET  /catalog           the sellable catalog, paginated, cached
+     POST /catalog/refresh   force a refetch (needs the admin key)
+     POST /cart/validate     reconcile a cart against live prices and stock
+     POST /checkout          build the order and get a Square checkout page
+     GET  /order             what Square says about an order, by status token
+     POST /webhooks/square   signed Square notifications
 
-   The Square access token never leaves this function. It is read from AWS
-   Secrets Manager (the secret named by the SECRET_ID environment variable)
-   and is never written to a response or to a log line.
+   The Square access token lives in Secrets Manager and never appears in a
+   response, a log line or the frontend. Prices always come from Square's
+   catalog. Shipping comes from the shop's configured zones. Tax comes from
+   the shop's own Square tax rules. None of those is ever read from the
+   browser.
 
-   Routing note: API Gateway hands us paths with the stage in front of them,
-   e.g. `/default/products`. routePath() takes the stage off before matching,
-   so both `/default/products` and `/products` land on the same handler.
-
-   Runtime: Node.js 24. The AWS SDK v3 ships with the managed runtime and
-   `fetch` is global, so this file has no dependencies to bundle: upload it on
-   its own and it runs.
+   Runtime: Node.js 24. Dependencies are bundled by `npm run package`.
    ========================================================================== */
 
-import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
-import { createHash } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 
-/* ---------------------------------------------------------------- config */
+import { loadSecrets, settings, publicConfig, ConfigError } from './lib/config.mjs';
+import { createSquareClient, SquareError } from './lib/square.mjs';
+import { buildCatalogSnapshot } from './lib/catalog.mjs';
+import { createStore, sha256, newToken, StoreError } from './lib/store.mjs';
+import { reconcileCart, cartFingerprint } from './lib/cart.mjs';
+import { validateFulfillment } from './lib/fulfillment.mjs';
+import { buildOrder, createPaymentLink, readOrderStatus } from './lib/checkout.mjs';
+import { verifySignature, interpret, shouldApply, SIGNATURE_HEADER } from './lib/webhook.mjs';
+import {
+  methodOf, routePath, rawBody, header, query, reply, parseJsonBody, corsHeaders
+} from './lib/http.mjs';
 
-/* The one variation this endpoint is allowed to sell, and the only quantity
-   it will accept. This is a test integration: anything else is refused
-   rather than quietly charged. */
-const ALLOWED_VARIATION_ID = process.env.ALLOWED_VARIATION_ID || 'T2APLGR5UFWGFELNUHGVNVI2';
-const ALLOWED_QUANTITY = 1;
+/* A warm container keeps the catalog in memory so most requests touch neither
+   DynamoDB nor Square. */
+let warmCatalog = null;
 
-/* Browsers that may call this API. The GitHub Pages origin has no repository
-   path on it — an Origin header is only ever scheme + host + port. */
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ||
-  'https://bellmorewebdesign.github.io,http://localhost:8000,http://127.0.0.1:8000')
-  .split(',').map(s => s.trim()).filter(Boolean);
+/* ------------------------------------------------------------- catalog */
 
-const SQUARE_VERSION = process.env.SQUARE_VERSION || '2026-09-16';
-const SECRET_ID = process.env.SECRET_ID;
-const SQUARE_TIMEOUT_MS = 10000;
+async function getCatalog(square, s, store, { force = false } = {}) {
+  const env = square.host.includes('sandbox') ? 'sandbox' : 'production';
+  const freshEnough = warmCatalog && Date.now() - warmCatalog.at < s.catalogTtlSeconds * 1000;
+  if (!force && freshEnough) return warmCatalog.snapshot;
 
-/* This build is sandbox-only on purpose. Pointing it at production would
-   take real money, so it refuses to run against anything else. */
-const REQUIRED_ENVIRONMENT = 'sandbox';
-const SQUARE_BASE = 'https://connect.squareupsandbox.com';
-
-/* --------------------------------------------------------------- secrets */
-
-/* Cached for the life of the container so a warm invocation does not pay for
-   a Secrets Manager round trip. A failure is not cached. */
-const secrets = new SecretsManagerClient({});
-let secretCache = null;
-
-async function loadConfig() {
-  if (secretCache) return secretCache;
-  if (!SECRET_ID) throw new ConfigError('SECRET_ID is not set on the function.');
-
-  const res = await secrets.send(new GetSecretValueCommand({ SecretId: SECRET_ID }));
-  let parsed;
-  try {
-    parsed = JSON.parse(res.SecretString || '{}');
-  } catch {
-    throw new ConfigError('The secret is not valid JSON.');
-  }
-
-  const environment = parsed.SQUARE_ENVIRONMENT;
-  if (environment !== REQUIRED_ENVIRONMENT) {
-    throw new ConfigError(
-      'SQUARE_ENVIRONMENT is "' + environment + '". This function only runs against ' + REQUIRED_ENVIRONMENT + '.'
-    );
-  }
-  if (!parsed.SQUARE_ACCESS_TOKEN) throw new ConfigError('SQUARE_ACCESS_TOKEN is missing from the secret.');
-  if (!parsed.SQUARE_LOCATION_ID) throw new ConfigError('SQUARE_LOCATION_ID is missing from the secret.');
-
-  secretCache = {
-    token: parsed.SQUARE_ACCESS_TOKEN,
-    locationId: parsed.SQUARE_LOCATION_ID,
-    environment
-  };
-  return secretCache;
-}
-
-class ConfigError extends Error {}
-
-/* ----------------------------------------------------------- square call */
-
-async function square(path, { token, method = 'GET', body }) {
-  const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), SQUARE_TIMEOUT_MS);
-  let res;
-  try {
-    res = await fetch(SQUARE_BASE + path, {
-      method,
-      signal: ctl.signal,
-      headers: {
-        'Authorization': 'Bearer ' + token,
-        'Square-Version': SQUARE_VERSION,
-        'Content-Type': 'application/json',
-        'Accept': 'application/json'
-      },
-      body: body ? JSON.stringify(body) : undefined
-    });
-  } catch (err) {
-    clearTimeout(timer);
-    throw new SquareError(
-      err.name === 'AbortError' ? 'Square did not answer in time.' : 'Could not reach Square.',
-      502, []
-    );
-  }
-  clearTimeout(timer);
-
-  const text = await res.text();
-  let json = {};
-  try { json = text ? JSON.parse(text) : {}; } catch { /* handled below */ }
-
-  if (!res.ok) {
-    /* Square's own error objects carry no credentials, so they are safe to
-       pass on and they are what makes a failure debuggable. */
-    const errors = Array.isArray(json.errors) ? json.errors.map(e => ({
-      category: e.category, code: e.code, detail: e.detail, field: e.field
-    })) : [];
-    console.error('Square ' + method + ' ' + path + ' failed', { status: res.status, errors });
-    throw new SquareError('Square rejected the request.', res.status >= 500 ? 502 : 400, errors);
-  }
-  return json;
-}
-
-class SquareError extends Error {
-  constructor(message, status, errors) {
-    super(message);
-    this.status = status;
-    this.errors = errors || [];
-  }
-}
-
-/* -------------------------------------------------------------- handlers */
-
-async function getProducts(cfg) {
-  const data = await square('/v2/catalog/list?types=ITEM', { token: cfg.token });
-
-  const products = (data.objects || [])
-    .filter(o => o.type === 'ITEM' && !o.is_deleted)
-    .map(o => {
-      const item = o.item_data || {};
-      return {
-        id: o.id,
-        name: item.name ?? null,
-        description: item.description ?? null,
-        imageIds: item.image_ids || [],
-        variations: (item.variations || [])
-          .filter(v => !v.is_deleted)
-          .map(v => {
-            const vd = v.item_variation_data || {};
-            return {
-              id: v.id,
-              name: vd.name ?? null,
-              sku: vd.sku ?? null,
-              /* Square speaks in the smallest currency unit. It is passed on
-                 exactly as given; the browser is what formats it. */
-              price: vd.price_money
-                ? { amount: Number(vd.price_money.amount), currency: vd.price_money.currency }
-                : null
-            };
-          })
-      };
-    });
-
-  return { success: true, environment: cfg.environment, count: products.length, products };
-}
-
-async function postCheckout(cfg, event) {
-  let body;
-  try {
-    body = JSON.parse(rawBody(event) || '{}');
-  } catch {
-    return reply(400, event, { success: false, error: 'BAD_JSON', message: 'The request body is not valid JSON.' });
-  }
-  if (!body || typeof body !== 'object' || Array.isArray(body)) {
-    return reply(400, event, { success: false, error: 'BAD_JSON', message: 'The request body must be a JSON object.' });
-  }
-
-  const variationId = typeof body.variationId === 'string' ? body.variationId.trim() : '';
-  const quantity = Number(body.quantity);
-  const idempotencyKey = typeof body.idempotencyKey === 'string' ? body.idempotencyKey.trim() : '';
-  // Older cached pages did not send a choice; keep their shipping checkout working.
-  const fulfillment = body.fulfillment === undefined ? 'shipping' : body.fulfillment;
-
-  if (fulfillment !== 'shipping' && fulfillment !== 'pickup') {
-    return reply(400, event, {
-      success: false, error: 'FULFILLMENT_NOT_ALLOWED',
-      message: 'Choose shipping or store pickup.'
-    });
-  }
-
-  if (variationId !== ALLOWED_VARIATION_ID) {
-    return reply(400, event, {
-      success: false, error: 'VARIATION_NOT_ALLOWED',
-      message: 'This endpoint only sells the one sandbox test variation.'
-    });
-  }
-  if (quantity !== ALLOWED_QUANTITY) {
-    return reply(400, event, {
-      success: false, error: 'QUANTITY_NOT_ALLOWED',
-      message: 'This endpoint only sells a quantity of ' + ALLOWED_QUANTITY + '.'
-    });
-  }
-  if (idempotencyKey.length < 8 || idempotencyKey.length > 128) {
-    return reply(400, event, {
-      success: false, error: 'BAD_IDEMPOTENCY_KEY',
-      message: 'Send an idempotencyKey between 8 and 128 characters.'
-    });
-  }
-
-  /* Nothing about money is read from `body`. The line item names a catalog
-     variation and Square prices it from its own catalog, so a browser cannot
-     talk the total down. */
-  const order = {
-    location_id: cfg.locationId,
-    line_items: [{ catalog_object_id: ALLOWED_VARIATION_ID, quantity: String(ALLOWED_QUANTITY) }]
-  };
-  if (fulfillment === 'pickup') {
-    order.fulfillments = [{
-      type: 'PICKUP',
-      state: 'PROPOSED',
-      pickup_details: {
-        // Queue the order for staff to prepare. Do not promise a preparation
-        // duration or reserve a pickup appointment. Staff must contact the buyer
-        // when ready; this API integration does not send readiness notifications.
-        schedule_type: 'ASAP',
-        note: 'Notify customer when ready; collect during store hours. Staff: contact the buyer using the order contact details before pickup. Sandbox preview only; do not send real messages for this test order.'
-      }
-    }];
-  }
-
-  // Separate choices even if a caller reuses a key. Never reuse a shipping link
-  // for pickup, or an older shipping-only build's link for this request shape.
-  const squareKey = 'asp-ready-pickup-v1-' + createHash('sha256')
-    .update(JSON.stringify([idempotencyKey, fulfillment, ALLOWED_VARIATION_ID, ALLOWED_QUANTITY]))
-    .digest('hex');
-
-  const created = await square('/v2/online-checkout/payment-links', {
-    token: cfg.token,
-    method: 'POST',
-    body: {
-      idempotency_key: squareKey,
-      order,
-      checkout_options: {
-        allow_tipping: false,            /* retail test, no tip screen */
-        // Collect the address on Square's hosted checkout. Shipping rates,
-        // carrier labels and delivery estimates are not configured by this flag.
-        ask_for_shipping_address: fulfillment === 'shipping'
-      }
+  if (!force) {
+    const cached = await store.readCatalog(env);
+    if (cached) {
+      warmCatalog = { snapshot: cached.snapshot, at: Date.now() };
+      return cached.snapshot;
     }
-  });
-
-  const link = created.payment_link || {};
-  if (!link.url) {
-    console.error('Square returned no payment link url', { keys: Object.keys(created) });
-    throw new SquareError('Square did not return a checkout URL.', 502, []);
   }
 
-  /* A link is a link. Whether anybody paid is Square's to say, not ours. */
+  try {
+    const snapshot = await buildCatalogSnapshot(square, s);
+    warmCatalog = { snapshot, at: Date.now() };
+    await store.writeCatalog(env, snapshot, s.catalogTtlSeconds)
+      .catch(err => console.error('catalog_cache_write_failed', err?.message));
+    return snapshot;
+  } catch (err) {
+    /* Square being down should not empty the shop. An old catalog, clearly
+       labelled as old, beats a blank page — and checkout revalidates against
+       Square anyway, so nothing stale can actually be sold at a stale price. */
+    const stale = await store.readCatalogStale(env).catch(() => null);
+    if (stale) {
+      console.error('catalog_serving_stale', err?.message);
+      warmCatalog = { snapshot: { ...stale.snapshot, stale: true }, at: Date.now() };
+      return warmCatalog.snapshot;
+    }
+    throw err;
+  }
+}
+
+async function handleCatalog(event, ctx) {
+  const { square, s, store } = ctx;
+  const snapshot = await getCatalog(square, s, store);
+
+  const limit = Math.min(Math.max(Number.parseInt(query(event, 'limit') || '', 10) || s.catalogPageSize, 1), 300);
+  const offset = Math.max(Number.parseInt(query(event, 'cursor') || '', 10) || 0, 0);
+  const page = snapshot.products.slice(offset, offset + limit);
+  const next = offset + limit < snapshot.products.length ? String(offset + limit) : null;
+
   return reply(200, event, {
     success: true,
-    environment: cfg.environment,
-    fulfillment,
-    pickupPolicy: fulfillment === 'pickup' ? 'notify_when_ready' : null,
-    checkoutUrl: link.url,
-    orderId: link.order_id ?? null,
-    paymentLinkId: link.id ?? null
+    environment: ctx.cfg.environment,
+    fetchedAt: snapshot.fetchedAt,
+    stale: snapshot.stale === true,
+    total: snapshot.products.length,
+    /* Categories and counts ride along on the first page only, so later pages
+       stay small. */
+    ...(offset === 0 ? { categories: snapshot.categories, counts: snapshot.counts } : {}),
+    products: page,
+    cursor: next
+  }, {
+    allowedOrigins: s.allowedOrigins,
+    /* Short browser cache: the storefront is allowed to be a minute behind,
+       because nothing it shows is what gets charged. */
+    cache: 'public, max-age=60'
   });
 }
 
-/* ----------------------------------------------------------------- http */
-
-function rawBody(event) {
-  if (!event.body) return '';
-  return event.isBase64Encoded ? Buffer.from(event.body, 'base64').toString('utf8') : event.body;
-}
-
-function methodOf(event) {
-  return (event.requestContext?.http?.method || event.httpMethod || 'GET').toUpperCase();
-}
-
-/* `/default/products` -> `/products`. API Gateway puts the stage in front of
-   the path; matching on the bare path keeps the routes readable and keeps
-   working if the API is ever moved to the $default stage. */
-function routePath(event) {
-  let p = event.rawPath || event.path || '/';
-  const stage = event.requestContext?.stage;
-  if (stage && stage !== '$default') {
-    if (p === '/' + stage) p = '/';
-    else if (p.startsWith('/' + stage + '/')) p = p.slice(stage.length + 1);
+async function handleRefresh(event, ctx) {
+  const { cfg, square, s, store } = ctx;
+  if (!cfg.adminKey) {
+    return reply(404, event, { success: false, error: 'NOT_FOUND', message: 'Refresh is switched off.' },
+      { allowedOrigins: s.allowedOrigins });
   }
-  p = p.replace(/\/+$/, '');
-  return p || '/';
+  const provided = header(event, 'x-admin-key') || '';
+  if (sha256(provided) !== sha256(cfg.adminKey)) {
+    return reply(403, event, { success: false, error: 'FORBIDDEN', message: 'Wrong admin key.' },
+      { allowedOrigins: s.allowedOrigins });
+  }
+  warmCatalog = null;
+  const snapshot = await getCatalog(square, s, store, { force: true });
+  return reply(200, event, {
+    success: true, fetchedAt: snapshot.fetchedAt, counts: snapshot.counts
+  }, { allowedOrigins: s.allowedOrigins });
 }
 
-function originOf(event) {
-  const h = event.headers || {};
-  return h.origin || h.Origin || '';
+/* ---------------------------------------------------------------- cart */
+
+async function handleCartValidate(event, ctx) {
+  const { s, square, store } = ctx;
+  const { body, error } = parseJsonBody(event);
+  if (error) return reply(400, event, { success: false, error: 'BAD_JSON', message: error }, { allowedOrigins: s.allowedOrigins });
+
+  const snapshot = await getCatalog(square, s, store);
+  const result = await reconcileCart(body.lines, { snapshot, settings: s, store });
+  if (!result.ok) {
+    return reply(400, event, { success: false, error: result.error, message: result.message },
+      { allowedOrigins: s.allowedOrigins });
+  }
+  return reply(200, event, { success: true, cart: result }, { allowedOrigins: s.allowedOrigins });
 }
 
-/* API Gateway's own CORS configuration wins when it is set; these headers are
-   what keeps the endpoint usable if it ever is not. */
-function corsHeaders(event) {
-  const origin = originOf(event);
-  if (!origin || !ALLOWED_ORIGINS.includes(origin)) return {};
-  return {
-    'Access-Control-Allow-Origin': origin,
-    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-    'Access-Control-Allow-Headers': 'content-type',
-    'Access-Control-Max-Age': '600',
-    'Vary': 'Origin'
-  };
+/* ------------------------------------------------------------ checkout */
+
+async function handleCheckout(event, ctx) {
+  const { cfg, s, square, store } = ctx;
+  const { body, error } = parseJsonBody(event);
+  if (error) return reply(400, event, { success: false, error: 'BAD_JSON', message: error }, { allowedOrigins: s.allowedOrigins });
+
+  const attemptId = typeof body.attemptId === 'string' && /^[A-Za-z0-9_-]{8,64}$/.test(body.attemptId)
+    ? body.attemptId : null;
+  if (!attemptId) {
+    return reply(400, event, {
+      success: false, error: 'BAD_ATTEMPT_ID',
+      message: 'Send an attemptId of 8 to 64 url-safe characters.'
+    }, { allowedOrigins: s.allowedOrigins });
+  }
+
+  const snapshot = await getCatalog(square, s, store);
+
+  /* Holds placed by this same attempt are excluded, so pressing Pay twice
+     does not make the customer compete with themselves for the last unit. */
+  const cart = await reconcileCart(body.lines, { snapshot, settings: s, store, attemptId });
+  if (!cart.ok) {
+    return reply(400, event, { success: false, error: cart.error, message: cart.message },
+      { allowedOrigins: s.allowedOrigins });
+  }
+
+  if (!cart.payableLines.length) {
+    return reply(409, event, {
+      success: false, error: 'CART_EMPTY_AFTER_REVIEW',
+      message: 'Nothing in the cart can be bought right now.',
+      cart
+    }, { allowedOrigins: s.allowedOrigins });
+  }
+
+  /* Anything changed since the customer last looked gets sent back for them
+     to approve. This is a 409, not a failure: the cart in the body is the
+     corrected one. */
+  if (cart.changed) {
+    return reply(409, event, {
+      success: false, error: 'CART_CHANGED',
+      message: 'Some items changed. Review the updated cart before paying.',
+      cart
+    }, { allowedOrigins: s.allowedOrigins });
+  }
+
+  const fulfillmentResult = validateFulfillment(body.fulfillment, {
+    settings: s, subtotal: cart.totals.subtotal
+  });
+  if (!fulfillmentResult.ok) {
+    return reply(400, event, {
+      success: false, error: 'FULFILLMENT_INVALID',
+      message: 'Check the delivery details.',
+      fieldErrors: fulfillmentResult.errors
+    }, { allowedOrigins: s.allowedOrigins });
+  }
+  const fulfillment = fulfillmentResult.fulfillment;
+
+  /* The idempotency key is the attempt plus a fingerprint of exactly what is
+     being bought and how it is getting there. A retried request reuses it and
+     gets the same link back; an edited cart produces a different key and a
+     genuinely new order. It lives in DynamoDB, so it survives the container. */
+  const fingerprint = cartFingerprint(cart.payableLines, fulfillment);
+  const idemKey = createHash('sha256').update(attemptId + '::' + fingerprint).digest('hex');
+
+  const claim = await store.claimIdempotency(idemKey);
+  if (!claim.claimed) {
+    const rec = claim.record;
+    if (rec?.status === 'DONE' && rec.result?.checkoutUrl) {
+      return reply(200, event, { success: true, replayed: true, ...rec.result },
+        { allowedOrigins: s.allowedOrigins });
+    }
+    /* Another request for this exact attempt is mid-flight. Telling the
+       customer to wait a moment is better than opening a second order. */
+    return reply(409, event, {
+      success: false, error: 'CHECKOUT_IN_PROGRESS',
+      message: 'This checkout is already being created. Give it a moment and try again.'
+    }, { allowedOrigins: s.allowedOrigins });
+  }
+
+  const taxIndex = new Map((snapshot.taxes || []).filter(t => t.enabled).map(t => [t.id, t]));
+  const statusToken = newToken();
+
+  try {
+    if (s.holdsEnabled) {
+      await store.placeHolds(attemptId, cart.payableLines.map(l => ({
+        variationId: l.variationId, quantity: l.quantity
+      })), { holdSeconds: s.holdSeconds }).catch(err => console.error('hold_place_failed', err?.message));
+    }
+
+    const referenceId = ('web-' + attemptId).slice(0, 40);
+    const order = buildOrder({
+      locationId: square.locationId,
+      lines: cart.payableLines,
+      fulfillment, settings: s, taxes: taxIndex, referenceId
+    });
+
+    const returnUrl = s.returnUrl + (s.returnUrl.includes('?') ? '&' : '?') + 't=' + encodeURIComponent(statusToken);
+    const link = await createPaymentLink(square, {
+      order,
+      idempotencyKey: idemKey,
+      returnUrl,
+      description: s.storeName + ' online order'
+    });
+
+    const record = {
+      checkoutUrl: link.checkoutUrl,
+      orderId: link.orderId,
+      paymentLinkId: link.paymentLinkId,
+      statusToken,
+      environment: cfg.environment,
+      fulfillmentType: fulfillment.type,
+      /* So the storefront can clear exactly the lines that were bought and
+         leave anything else alone. */
+      purchasedVariationIds: cart.payableLines.map(l => l.variationId)
+    };
+
+    if (link.orderId) {
+      await store.saveOrder({
+        orderId: link.orderId,
+        statusTokenHash: sha256(statusToken),
+        status: 'pending',
+        attemptId,
+        environment: cfg.environment,
+        fulfillmentType: fulfillment.type,
+        contactEmail: fulfillment.contact.email,
+        createdAt: Date.now(),
+        lines: cart.payableLines.map(l => ({
+          variationId: l.variationId, productName: l.productName,
+          name: l.name, quantity: l.quantity, unitPrice: l.unitPrice
+        })),
+        subtotal: cart.totals.subtotal,
+        shippingAmount: fulfillment.shipping?.amount ?? 0,
+        currency: cart.totals.currency
+      }, { retentionDays: s.orderRetentionDays });
+    }
+
+    await store.completeIdempotency(idemKey, record);
+
+    return reply(200, event, {
+      success: true,
+      ...record,
+      /* Said plainly, because the next thing that happens is a redirect and
+         a redirect proves nothing. */
+      paymentConfirmed: false,
+      pickupPolicy: fulfillment.type === 'pickup' ? s.pickup.policy : null,
+      shipping: fulfillment.shipping
+    }, { allowedOrigins: s.allowedOrigins });
+
+  } catch (err) {
+    /* A failed attempt must not wedge the key, or the customer can never try
+       again with the same cart. */
+    await store.releaseIdempotency(idemKey);
+    if (s.holdsEnabled) {
+      await store.releaseHolds(attemptId, cart.payableLines.map(l => l.variationId));
+    }
+    throw err;
+  }
 }
 
-function reply(status, event, payload) {
-  return {
-    statusCode: status,
-    headers: {
-      'Content-Type': 'application/json',
-      'Cache-Control': 'no-store',
-      ...corsHeaders(event)
-    },
-    body: JSON.stringify(payload)
-  };
+/* --------------------------------------------------------- order status */
+
+async function handleOrderStatus(event, ctx) {
+  const { s, square, store } = ctx;
+  const token = query(event, 't') || '';
+  if (!token || token.length < 20 || token.length > 128) {
+    return reply(400, event, { success: false, error: 'BAD_TOKEN', message: 'Missing order token.' },
+      { allowedOrigins: s.allowedOrigins });
+  }
+
+  /* Lookup is by the hash of the token only. There is no way to ask this
+     endpoint about an order by its id, so one customer cannot read another's. */
+  const orderId = await store.getOrderIdForToken(sha256(token));
+  if (!orderId) {
+    return reply(404, event, { success: false, error: 'NOT_FOUND', message: 'No order matches that link.' },
+      { allowedOrigins: s.allowedOrigins });
+  }
+
+  const stored = await store.getOrder(orderId);
+  let live = null;
+  try {
+    live = await readOrderStatus(square, orderId);
+  } catch (err) {
+    console.error('order_status_lookup_failed', err?.message);
+  }
+
+  /* Square is the authority. The stored row is a fallback for when Square is
+     briefly unreachable, and it says so. */
+  const status = live?.status || stored?.status || 'pending';
+  if (live && stored && shouldApply(stored.status, live.status)) {
+    await store.updateOrderStatus(orderId, { status: live.status })
+      .catch(err => console.error('order_status_write_failed', err?.message));
+  }
+
+  return reply(200, event, {
+    success: true,
+    verified: Boolean(live),
+    status,
+    fulfillmentType: stored?.fulfillmentType || null,
+    pickupPolicy: stored?.fulfillmentType === 'pickup' ? s.pickup.policy : null,
+    pickupAddress: stored?.fulfillmentType === 'pickup' ? s.pickup.address : null,
+    purchasedVariationIds: (stored?.lines || []).map(l => l.variationId),
+    order: live ? {
+      createdAt: live.createdAt, totals: live.totals, lines: live.lines, fulfillment: live.fulfillment
+    } : null
+  }, { allowedOrigins: s.allowedOrigins });
 }
 
-/* ---------------------------------------------------------------- entry */
+/* -------------------------------------------------------------- webhook */
+
+async function handleWebhook(event, ctx) {
+  const { cfg, s, store } = ctx;
+  const body = rawBody(event);
+
+  if (!cfg.webhookSignatureKey) {
+    console.error('webhook_rejected_no_key');
+    return { statusCode: 503, headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: 'WEBHOOKS_NOT_CONFIGURED' }) };
+  }
+
+  const notificationUrl = process.env.WEBHOOK_NOTIFICATION_URL || '';
+  if (!notificationUrl) {
+    console.error('webhook_rejected_no_url');
+    return { statusCode: 503, headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: 'WEBHOOK_URL_NOT_CONFIGURED' }) };
+  }
+
+  const ok = verifySignature({
+    notificationUrl, rawBody: body,
+    signatureKey: cfg.webhookSignatureKey,
+    provided: header(event, SIGNATURE_HEADER)
+  });
+  if (!ok) {
+    console.error('webhook_bad_signature');
+    /* 401 and nothing else. An attacker learns only that it was refused. */
+    return { statusCode: 401, headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: 'BAD_SIGNATURE' }) };
+  }
+
+  let parsed;
+  try { parsed = JSON.parse(body); } catch {
+    return { statusCode: 400, body: JSON.stringify({ error: 'BAD_JSON' }) };
+  }
+
+  const eventId = parsed.event_id || parsed.id;
+  if (eventId) {
+    const first = await store.claimWebhookEvent(eventId);
+    /* Square redelivers. A repeat is a success, not a problem: answering 200
+       is what stops it being retried forever. */
+    if (!first) return { statusCode: 200, body: JSON.stringify({ ok: true, duplicate: true }) };
+  }
+
+  const meaning = interpret(parsed);
+  if (!meaning) return { statusCode: 200, body: JSON.stringify({ ok: true, ignored: true }) };
+
+  const stored = await store.getOrder(meaning.orderId);
+  if (!stored) {
+    /* An order this website did not create — an in-store sale, for instance.
+       Nothing to update and nothing to worry about. */
+    return { statusCode: 200, body: JSON.stringify({ ok: true, unknownOrder: true }) };
+  }
+
+  if (shouldApply(stored.status, meaning.status)) {
+    await store.updateOrderStatus(meaning.orderId, {
+      status: meaning.status,
+      lastEventId: eventId || null,
+      lastEventSource: meaning.source
+    });
+  }
+
+  /* Inventory is deliberately untouched. Square decrements catalog stock
+     itself when an order with catalog line items is paid, so adjusting it
+     here would take the same units off the shelf twice. */
+  return { statusCode: 200, body: JSON.stringify({ ok: true }) };
+}
+
+/* ----------------------------------------------------------------- entry */
+
+const ROUTES = [
+  ['GET',  '/config',          (e, c) => reply(200, e, { success: true, config: publicConfig(c.cfg, c.s) }, { allowedOrigins: c.s.allowedOrigins, cache: 'public, max-age=120' })],
+  ['GET',  '/catalog',         handleCatalog],
+  ['POST', '/catalog/refresh', handleRefresh],
+  ['POST', '/cart/validate',   handleCartValidate],
+  ['POST', '/checkout',        handleCheckout],
+  ['GET',  '/order',           handleOrderStatus],
+  ['POST', '/webhooks/square', handleWebhook]
+];
 
 export const handler = async (event) => {
   const method = methodOf(event);
   const path = routePath(event);
+  const s = settings();
 
   if (method === 'OPTIONS') {
-    return { statusCode: 204, headers: corsHeaders(event), body: '' };
+    return { statusCode: 204, headers: corsHeaders(event, s.allowedOrigins), body: '' };
   }
 
+  const route = ROUTES.find(([m, p]) => m === method && p === path);
+  if (!route) {
+    return reply(404, event, {
+      success: false, error: 'NOT_FOUND', message: 'No route for ' + method + ' ' + path
+    }, { allowedOrigins: s.allowedOrigins });
+  }
+
+  const requestId = event.requestContext?.requestId || randomUUID();
   try {
-    if (path === '/products' && method === 'GET') {
-      const cfg = await loadConfig();
-      return reply(200, event, await getProducts(cfg));
-    }
-    if (path === '/checkout' && method === 'POST') {
-      const cfg = await loadConfig();
-      /* awaited on purpose: a bare `return promise` here would sail past
-         the catch below and surface as a raw 502 from API Gateway. */
-      return await postCheckout(cfg, event);
-    }
-    return reply(404, event, { success: false, error: 'NOT_FOUND', message: 'No route for ' + method + ' ' + path });
+    const cfg = await loadSecrets();
+    const square = createSquareClient(cfg);
+    const store = createStore({ tableName: s.tableName });
+    return await route[2](event, { cfg, s, square, store });
   } catch (err) {
     if (err instanceof SquareError) {
-      return reply(err.status, event, {
-        success: false, error: 'SQUARE_ERROR', message: err.message, details: err.errors
-      });
+      const pub = err.toPublic();
+      return reply(err.status >= 500 ? 502 : err.status, event, {
+        success: false, error: 'SQUARE_ERROR', message: pub.message, details: pub.details, requestId
+      }, { allowedOrigins: s.allowedOrigins });
     }
-    if (err instanceof ConfigError) {
-      /* The message names which key is wrong, never its value. */
-      console.error('Configuration problem', err.message);
-      return reply(500, event, { success: false, error: 'CONFIG_ERROR', message: err.message });
+    if (err instanceof ConfigError || err instanceof StoreError) {
+      /* Names the setting at fault, never its value. */
+      console.error('config_error', requestId, err.message);
+      return reply(500, event, { success: false, error: 'CONFIG_ERROR', message: err.message, requestId },
+        { allowedOrigins: s.allowedOrigins });
     }
-    console.error('Unhandled error', err);
-    return reply(500, event, { success: false, error: 'SERVER_ERROR', message: 'Something went wrong.' });
+    console.error('unhandled_error', requestId, err?.stack || err?.message || err);
+    return reply(500, event, { success: false, error: 'SERVER_ERROR', message: 'Something went wrong.', requestId },
+      { allowedOrigins: s.allowedOrigins });
   }
 };
+
+/* Exported for the tests, which drive the handlers directly with fakes rather
+   than standing up DynamoDB and Square. */
+export const __internal = { getCatalog, handleCheckout, handleCatalog, handleWebhook, handleOrderStatus, handleCartValidate };
