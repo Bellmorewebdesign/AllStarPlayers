@@ -77,6 +77,16 @@ order.html   what Square decided   -> js/order-page.js
   age shown. A checkout re-reads price and stock from Square for exactly the
   variations in that cart, every time, and refuses the sale outright if
   Square cannot answer.
+- **One product list, never two stitched together.** Pages are pinned to the
+  build they started on: the cursor names it, and the build is kept for fifteen
+  minutes after a newer one goes live. If a shopper's build does go, the API
+  says so (`409`) and the page reloads the list from the top rather than
+  joining half of one catalog to half of another.
+- **An empty shop is shown as an empty shop.** If the scheduled job reads
+  Square completely and nothing is sellable, it publishes that, and the page
+  says everything is sold out. A *failed* read does the opposite and keeps the
+  last good list serving, so people are never sent after products that are
+  not there.
 - **Only ids and quantities are stored locally.** Anything else goes stale, and
   a stale price in storage is exactly what an attacker would like to edit.
 - **Unknown stock is not unlimited stock.** A variation Square is not counting
@@ -141,7 +151,7 @@ backend/
   lib/webhook.mjs      signature verification and event interpretation
   lib/cleanup.mjs      cancels abandoned payment links, then frees their stock
   lib/refresh.mjs      the scheduled catalog rebuild, and its atomic publish
-  test/                184 checks against a fake Square and an in-memory DynamoDB
+  test/                197 checks against a fake Square and an in-memory DynamoDB
 ```
 
 ```bash

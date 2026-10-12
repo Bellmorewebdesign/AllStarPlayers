@@ -190,18 +190,37 @@ export function createStore({ tableName, client } = {}) {
   }
 
   /* What a browsing request calls. One small read for the pointer, then the
-     chunks it names. It never builds anything. */
-  async function readCatalogSnapshot(env) {
-    const pointer = await readCatalogPointer(env);
-    if (!pointer?.buildId) return null;
-    const snapshot = await readCatalogBuild(env, pointer.buildId, pointer.chunkCount);
-    if (!snapshot) return { pointer, snapshot: null, unreadable: true };
-    return {
-      pointer, snapshot, unreadable: false,
-      buildId: pointer.buildId,
-      fetchedAt: pointer.fetchedAt,
-      builtAt: pointer.builtAt ?? null
-    };
+     chunks it names. It never builds anything.
+
+     Those are two separate reads, so a refresh can land in between: the
+     pointer we read says A, and by the time we ask for A's chunks the
+     pointer says B. Retention makes that rare, and this retry makes it
+     harmless — read the pointer again, and if it has moved, follow it. */
+  async function readCatalogSnapshot(env, { attempts = 3 } = {}) {
+    let lastPointer = null;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      const pointer = await readCatalogPointer(env);
+      if (!pointer?.buildId) return null;
+      lastPointer = pointer;
+
+      const snapshot = await readCatalogBuild(env, pointer.buildId, pointer.chunkCount);
+      if (snapshot) {
+        return {
+          pointer, snapshot, unreadable: false,
+          buildId: pointer.buildId,
+          fetchedAt: pointer.fetchedAt,
+          builtAt: pointer.builtAt ?? null
+        };
+      }
+
+      /* Only worth another go if somebody has moved the pointer since. */
+      const again = await readCatalogPointer(env);
+      if (!again?.buildId || again.buildId === pointer.buildId) break;
+      console.log('catalog_pointer_moved_mid_read', JSON.stringify({
+        env, from: pointer.buildId, to: again.buildId
+      }));
+    }
+    return { pointer: lastPointer, snapshot: null, unreadable: true };
   }
 
   /* ---- writing a build: chunks first, pointer last, prune afterwards ---- */
@@ -237,34 +256,71 @@ export function createStore({ tableName, client } = {}) {
       builtAt: Date.now(),
       counts: meta.counts ?? null
     });
+    /* The outgoing build's clock starts now, not when it was built: readers
+       that picked it up a second ago still get their grace period. */
+    if (previous?.buildId && previous.buildId !== meta.buildId) {
+      const builds = await readBuildLedger(env);
+      await writeBuildLedger(env, builds.map(b =>
+        b.id === previous.buildId && !b.supersededAt ? { ...b, supersededAt: Date.now() } : b));
+    }
     return { previousBuildId: previous?.buildId ?? null };
   }
 
-  /* Remember a build the moment it is started, so a refresh that dies
-     halfway leaves a trail and the next run can clear up after it. */
-  async function noteCatalogBuild(env, buildId) {
+  /* The builds we know about, and what happened to them. Tolerates the older
+     shape (a bare list of ids) so an already-deployed table keeps working. */
+  async function readBuildLedger(env) {
     const row = await get(catalogPk(env), 'BUILDS');
-    const ids = Array.isArray(row?.ids) ? row.ids : [];
-    const next = [...new Set([...ids, buildId])].slice(-12);
-    await put({ pk: catalogPk(env), sk: 'BUILDS', ids: next });
+    if (Array.isArray(row?.builds)) return row.builds.filter(b => b && b.id);
+    if (Array.isArray(row?.ids)) return row.ids.filter(Boolean).map(id => ({ id, startedAt: 0, supersededAt: 0 }));
+    return [];
   }
 
-  /* Delete every build that is not the live one. Self-healing: an orphan
-     left by a crashed refresh goes on the next successful run. */
-  async function pruneCatalogBuilds(env, keepBuildId) {
-    const row = await get(catalogPk(env), 'BUILDS');
-    const ids = Array.isArray(row?.ids) ? row.ids : [];
-    const doomed = ids.filter(id => id && id !== keepBuildId);
+  const writeBuildLedger = (env, builds) =>
+    put({ pk: catalogPk(env), sk: 'BUILDS', builds: builds.slice(-24) });
 
-    for (const id of doomed) {
-      const rows = await queryPk(buildPk(env, id));
+  /* Noted the moment a build is started, so a refresh that dies halfway
+     leaves a trail and the next run can clear up after it. */
+  async function noteCatalogBuild(env, buildId) {
+    const builds = await readBuildLedger(env);
+    if (builds.some(b => b.id === buildId)) return;
+    await writeBuildLedger(env, [...builds, { id: buildId, startedAt: Date.now(), supersededAt: 0 }]);
+  }
+
+  /* Delete the builds nothing points at AND nothing can still be reading.
+
+     The grace period is the whole point. A browsing request reads the pointer
+     and then fetches that build's chunks as a second call; deleting the build
+     between those two reads used to strand it, and the shop answered 503 even
+     though a perfectly good newer build existed. A superseded build therefore
+     sticks around for BUILD_RETENTION_SECONDS before it goes.
+
+     A build that was never published gets the same grace from when it was
+     started, so a refresh still writing its chunks is never swept out from
+     under itself. */
+  async function pruneCatalogBuilds(env, keepBuildId, { retentionSeconds = 900 } = {}) {
+    const builds = await readBuildLedger(env);
+    const cutoff = Date.now() - retentionSeconds * 1000;
+
+    const doomed = builds.filter(b => {
+      if (!b.id || b.id === keepBuildId) return false;
+      const settledAt = Number(b.supersededAt || b.startedAt || 0);
+      /* Nothing recorded at all is an old-format row; treat it as ripe. */
+      if (!settledAt) return true;
+      return settledAt <= cutoff;
+    });
+
+    for (const b of doomed) {
+      const rows = await queryPk(buildPk(env, b.id));
       for (const group of chunkArray(rows, 25)) {
         await batchWrite(group.map(r => ({ DeleteRequest: { Key: marshall({ pk: r.pk, sk: r.sk }) } })))
-          .catch(err => console.error('catalog_prune_failed', id, err?.message));
+          .catch(err => console.error('catalog_prune_failed', b.id, err?.message));
       }
     }
-    await put({ pk: catalogPk(env), sk: 'BUILDS', ids: keepBuildId ? [keepBuildId] : [] });
-    return { pruned: doomed };
+
+    const doomedIds = new Set(doomed.map(b => b.id));
+    const kept = builds.filter(b => !doomedIds.has(b.id));
+    await writeBuildLedger(env, kept);
+    return { pruned: [...doomedIds], retained: kept.map(b => b.id) };
   }
 
   /* --------------------------- one refresh at a time --------------------- */
@@ -699,7 +755,7 @@ export function createStore({ tableName, client } = {}) {
 
   return {
     readCatalogPointer, readCatalogBuild, readCatalogSnapshot,
-    writeCatalogBuild, publishCatalogBuild, noteCatalogBuild, pruneCatalogBuilds,
+    writeCatalogBuild, publishCatalogBuild, noteCatalogBuild, pruneCatalogBuilds, readBuildLedger,
     acquireCatalogLock, releaseCatalogLock,
     readCatalogStatus, recordCatalogStatus, newBuildId,
     enqueueSweep, dueSweeps, deleteSweep, rescheduleSweep, stuckSweeps, sweepForAttempt,

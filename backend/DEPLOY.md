@@ -209,6 +209,7 @@ Commas inside the JSON need escaping on the CLI; the console is easier for
 | `CATALOG_TTL_SECONDS` | 900 | how old a snapshot may be before the storefront calls it stale. It is still served either way |
 | `REFRESH_LEASE_SECONDS` | 600 | the refresh lease. **Must exceed the Lambda timeout** |
 | `CATALOG_WARM_RETRY_SECONDS` | 15 | what a browsing request is told to wait while the first snapshot builds |
+| `BUILD_RETENTION_SECONDS` | 900 | how long a replaced catalog build is kept after a newer one goes live, so a shopper part-way through paging the shop is not cut off. See §5b |
 | `APPLY_CATALOG_TAXES` | `true` | attach the shop's own Square tax rules to the order |
 | `SQUARE_ASK_FOR_SHIPPING_ADDRESS` | `false` | see §7 |
 | `INFLIGHT_RECOVERY_MS` | 15000 | how long a half-finished checkout or webhook is left alone before another request takes it over |
@@ -321,7 +322,53 @@ Log lines worth a CloudWatch metric filter before launch:
 | `catalog_refresh_failed` | the live catalog is now ageing. Alarm on this |
 | `catalog_refresh_skipped` | a run collided with one still going. Fine occasionally, a problem if constant |
 | `catalog_pointer_unreadable` | should be impossible; the shop is serving 503s |
+| `catalog_refreshed_empty` | the read succeeded and nothing is sellable. See §5b |
+| `catalog_pointer_moved_mid_read` | a browsing request met a publish head-on and followed it. Harmless; constant means refreshes are overlapping with traffic oddly |
 | `scheduled_task_failed` | a scheduled invocation blew up before it could report |
+
+## 5b. Builds, cursors and an empty shop
+
+Three things about the snapshot that matter in production.
+
+**A build is kept after it is replaced.** Each refresh writes a new build under
+its own keys and flips one pointer row at the end, so the swap is atomic. The
+build it replaced is *not* deleted straight away: it is kept for
+`BUILD_RETENTION_SECONDS` (default 900, fifteen minutes), because a shopper may
+be part-way through reading it. Only builds that have been settled longer than
+that are deleted, by the next refresh. Nothing deletes a build on a timer of its
+own, so a function that stops being invoked leaves its builds alone rather than
+emptying the table.
+
+Raise it if you ever see `catalog_pointer_unreadable`. Lower it only to save
+storage, and never below the time a slow phone takes to page through the whole
+shop.
+
+**A cursor names the build it belongs to.** `GET /catalog` answers with
+`cursor: "<buildId>~<offset>"`, and `?cursor=` continues *that* build, not
+whatever is current. That is what stops a refresh landing mid-walk from giving a
+client page one of the old catalog and page two of the new one, with products
+repeated and products missing.
+
+If the build a cursor names has aged out, the answer is **409
+`CATALOG_CURSOR_EXPIRED`**, carrying the current `buildId`. It is not an error
+to alarm on: the storefront throws away what it has and starts again from page
+one (up to three times), which is the only answer that cannot mix generations.
+A cursor from before this change — a bare number — gets the same 409, because
+there is no way to tell which build it came from.
+
+**An empty shop is published.** A refresh that reads Square completely and finds
+nothing sellable publishes an empty catalog and logs
+`catalog_refreshed_empty`. `GET /catalog` then answers `200` with
+`total: 0`, and the shop page says everything is sold out. It does **not** keep
+yesterday's products on the website, which would let people click through to
+things that are not there.
+
+A *failed* read is the opposite and behaves the opposite way: a catalog page
+that errors, an inventory batch that errors, or a write that fails all leave the
+previous snapshot serving and log `catalog_refresh_failed`. So an empty shop
+page means Square really answered with nothing for sale — check
+`catalog_refreshed_empty` against the Square dashboard rather than assuming a
+broken read.
 
 ## 6. IAM: the narrowest policy that works
 
@@ -703,7 +750,9 @@ Do all of these in sandbox before touching production.
 
 1. `GET /config` returns the fulfillment methods you configured, and no ids or
    tokens.
-2. `GET /catalog` returns products, and `?cursor=` walks to the end.
+2. `GET /catalog` returns products, and `?cursor=` walks to the end. The cursor
+   looks like `20261012T170401Z-ab12cd~120`; passing a bare number, or a cursor
+   whose build has aged out, gives `409 CATALOG_CURSOR_EXPIRED` (§5b).
 3. The shop page lists the sandbox catalog with real photos where Square has
    them.
 4. Add two different variations of one item; they stay separate lines.
@@ -777,6 +826,17 @@ Do all of these in sandbox before touching production.
     `POST /admin/holds/release` without `confirm` (it must refuse), then with
     it (the stock comes back), and check the `hold_released_by_hand` line is
     in CloudWatch.
+30. **A refresh mid-walk.** Request `GET /catalog?limit=1`, keep the cursor,
+    run the refresh task twice, then pass that cursor. Within
+    `BUILD_RETENTION_SECONDS` it must answer `200` with the same `buildId` it
+    started on; once that build has aged out and been pruned it must answer
+    `409 CATALOG_CURSOR_EXPIRED` with the current `buildId`. Loading the shop
+    page while a refresh lands must never show a product twice (§5b).
+31. **An empty shop.** In the Square sandbox, set every tracked variation to
+    zero (or point at an empty sandbox catalog) and run the refresh. It should
+    report `refreshed: true` with zero products, log `catalog_refreshed_empty`,
+    and the shop page should say everything is sold out — not show the old
+    products and not show an error.
 
 ## Going live
 

@@ -30,6 +30,8 @@
     searchClear: document.querySelector('[data-search-clear]'),
     sort: document.getElementById('shop-sort'),
     noResults: document.querySelector('[data-no-results]'),
+    noResultsTitle: document.querySelector('[data-no-results-title]'),
+    noResultsBody: document.querySelector('[data-no-results-body]'),
     status: document.querySelector('[data-catalog-status]'),
     more: document.querySelector('[data-load-more]'),
     activeFilters: document.querySelector('[data-active-filters]'),
@@ -123,6 +125,17 @@
     if (els.count) els.count.textContent = 'Loading the shop…';
 
     ASP.api.catalog(function (progress) {
+      /* The product list was rebuilt while we were paging through it, so the
+         client starts again from the first page. Clear what we drew rather
+         than leaving half of the old catalog on screen beside the new one. */
+      if (progress.restarted) {
+        state.products = [];
+        state.meta = null;
+        state.loaded = false;
+        skeleton(8);
+        if (els.count) els.count.textContent = 'The shop was just updated. Loading it again…';
+        return;
+      }
       state.products = progress.products;
       state.meta = progress.meta;
       if (!state.loaded) {
@@ -295,7 +308,23 @@
       els.more.hidden = list.length <= state.shown;
       els.more.textContent = 'Show more products (' + (list.length - state.shown) + ' left)';
     }
-    if (els.noResults) els.noResults.hidden = list.length > 0;
+    if (els.noResults) {
+      els.noResults.hidden = list.length > 0;
+      /* An empty shop is not a failed search. Telling somebody to clear
+         filters they never set, when there is genuinely nothing in stock,
+         just sends them round in a circle. */
+      var emptyShop = state.products.length === 0;
+      if (els.noResultsTitle) {
+        els.noResultsTitle.textContent = emptyShop
+          ? 'Everything is sold out right now.'
+          : 'Nothing matches that.';
+      }
+      if (els.noResultsBody) {
+        els.noResultsBody.textContent = emptyShop
+          ? 'New stock is added regularly — check back soon, or come see us in the shop.'
+          : 'Try another category, or clear the filters to see the whole catalog.';
+      }
+    }
     if (els.count && state.loaded) {
       els.count.innerHTML = list.length
         ? 'Showing <b>' + page.length + '</b> of ' + list.length + ' products'
@@ -330,7 +359,9 @@
       }
     }
     var pristine = state.category === 'all' && !state.q;
-    Array.prototype.forEach.call(els.clearButtons, function (b) { b.hidden = pristine; });
+    Array.prototype.forEach.call(els.clearButtons, function (b) {
+      b.hidden = pristine || state.products.length === 0;
+    });
     if (els.filterBtn) els.filterBtn.classList.toggle('has-active', state.category !== 'all');
     if (els.searchClear) els.searchClear.classList.toggle('is-visible', !!state.q);
   }

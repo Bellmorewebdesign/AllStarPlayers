@@ -57,11 +57,24 @@ export async function refreshCatalog({ square, store, settings, environment, hol
 
     const snapshot = await buildCatalogSnapshot(square, settings);
 
-    /* A catalog with nothing in it is almost certainly a broken read rather
-       than a shop that sold everything, and publishing it would empty the
-       website. Keep what we have and shout. */
+    /* An empty catalog is published like any other.
+
+       It used to be refused, on the theory that nothing-to-sell meant a
+       broken read. That was wrong twice over. A shop really can sell out of
+       everything, and refusing left the website showing products that
+       checkout would then decline — a worse experience than an honest empty
+       shop, and one that never corrects itself. And a genuinely broken read
+       does not reach this line: a failed catalog page or inventory batch
+       throws, and the pointer is never touched.
+
+       So: completeness is proved by having got here without an error, not by
+       the number of products. It is logged plainly so an empty shop is
+       noticed rather than discovered. */
     if (!snapshot.products.length) {
-      throw new Error('Square returned a catalog with no sellable products; refusing to publish it.');
+      console.warn('catalog_refreshed_empty', JSON.stringify({
+        env, buildId,
+        note: 'Square answered completely and nothing is sellable right now.'
+      }));
     }
 
     const written = await store.writeCatalogBuild(env, buildId, snapshot);
@@ -74,7 +87,7 @@ export async function refreshCatalog({ square, store, settings, environment, hol
     });
 
     /* Only now that the pointer has moved. */
-    const pruned = await store.pruneCatalogBuilds(env, buildId)
+    const pruned = await store.pruneCatalogBuilds(env, buildId, { retentionSeconds: settings.buildRetentionSeconds })
       .catch(err => { console.error('catalog_prune_failed', err?.message); return { pruned: [] }; });
 
     const durationMs = Date.now() - startedAt;

@@ -234,20 +234,27 @@ test('a failed refresh leaves the live catalog exactly as it was', async () => {
   assert.equal((await refresh(handler)).refreshed, true);
 });
 
-test('a catalog that comes back empty is refused rather than published', async () => {
+test('a complete read with nothing sellable is published, not refused', async () => {
   const { handler } = await bootstrap();
   const good = await refresh(handler);
+  assert.ok(good.buildId);
 
-  /* Square answering with nothing is far more likely to be a broken read
-     than a shop that sold everything, and publishing it would empty the
-     website. */
+  /* A shop can genuinely sell out. Refusing to publish that leaves yesterday's
+     products on the website, which is worse than an empty shop: people can
+     still click through to something that is not there. What matters is that
+     the read was complete, and a failed read is handled separately below. */
   const empty = await bootstrap({
     handlers: squareHandlers({ 'GET /v2/catalog/list': () => ({ json: { objects: [] } }) })
   });
   const r = await refresh(empty.handler);
-  assert.equal(r.refreshed, false);
-  assert.match(r.error, /no sellable products/i);
-  assert.ok(good.buildId);
+  assert.equal(r.refreshed, true);
+  assert.equal(r.counts.products, 0);
+  assert.equal(r.error, undefined);
+
+  const page = await empty.handler(ev('GET', '/catalog'));
+  assert.equal(page.statusCode, 200, 'an empty shop is a shop, not an outage');
+  assert.equal(J(page).total, 0);
+  assert.equal(J(page).products.length, 0);
 });
 
 test('a refresh that throws still releases its lease', async () => {
@@ -282,7 +289,7 @@ test('a refresh killed while writing cannot replace the live catalog', async () 
   assert.deepEqual(J(after).products.map(p => p.id), before.products.map(p => p.id));
 });
 
-test('the orphan a crashed refresh left behind is swept up by the next one', async () => {
+test('the orphan a crashed refresh left behind is swept up once it is cold', async () => {
   const ddb = fakeDynamo();
   const { handler } = await bootstrap({ ddb });
   await refresh(handler);
@@ -292,16 +299,28 @@ test('the orphan a crashed refresh left behind is swept up by the next one', asy
   });
   await refresh(killer.handler);
 
-  const partitionsBefore = new Set(ddb.dump()
+  const partitions = () => new Set(ddb.dump()
     .filter(r => String(r.pk).startsWith('CATALOG#production#B')).map(r => r.pk));
-  assert.ok(partitionsBefore.size >= 1);
+  assert.ok(partitions().size >= 2, 'the crash left chunks behind');
+
+  /* Builds are kept for a retention window, because deleting one straight
+     away strands anybody who is reading it. So the next refresh does not
+     clear the orphan yet. */
+  const soon = await refresh(handler);
+  assert.equal(soon.refreshed, true);
+  assert.ok(partitions().size > 1, 'nothing is deleted while it may still be being read');
+
+  /* Age every build but the live one past the window, and the refresh after
+     that does clear them. */
+  const ledger = ddb.find('CATALOG#production').find(r => r.sk === 'BUILDS');
+  const cold = Date.now() - 3 * 3600 * 1000;
+  ledger.builds = ledger.builds.map(b => ({ ...b, startedAt: cold, supersededAt: cold }));
 
   const next = await refresh(handler);
   assert.equal(next.refreshed, true);
-  const partitionsAfter = new Set(ddb.dump()
-    .filter(r => String(r.pk).startsWith('CATALOG#production#B')).map(r => r.pk));
-  assert.equal(partitionsAfter.size, 1, 'only the live build is left: ' + [...partitionsAfter].join(', '));
-  assert.ok([...partitionsAfter][0].endsWith(next.buildId));
+  const after = partitions();
+  assert.equal(after.size, 1, 'only the live build is left: ' + [...after].join(', '));
+  assert.ok([...after][0].endsWith(next.buildId));
 });
 
 /* ======================================================================

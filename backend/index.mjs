@@ -44,9 +44,17 @@ import {
   methodOf, routePath, rawBody, header, query, reply, parseJsonBody, corsHeaders
 } from './lib/http.mjs';
 
-/* A warm container keeps the last build it read in memory, keyed by build id,
-   so a repeat request costs one small DynamoDB read and no parsing at all. */
-let warmCatalog = null;
+/* A warm container keeps recently-read builds in memory, keyed by build id.
+   More than one, because a client paging through the shop stays pinned to the
+   build it started on while a refresh publishes a newer one. */
+const warmBuilds = new Map();
+const WARM_LIMIT = 3;
+
+function rememberBuild(entry) {
+  warmBuilds.set(entry.buildId, entry);
+  while (warmBuilds.size > WARM_LIMIT) warmBuilds.delete(warmBuilds.keys().next().value);
+  return entry;
+}
 
 /* Nothing reachable over HTTP is allowed to rebuild the catalog. Rebuilding
    means paging all of Square, which took longer than the function's timeout
@@ -62,32 +70,97 @@ export class CatalogNotReadyError extends Error {
   }
 }
 
-async function getCatalog(ctx) {
-  const { s, store, cfg } = ctx;
+/* The page the client asked to continue belongs to a build that has since
+   been cleaned up. Mixing it with the current one would hand them a list with
+   products missing or repeated, so they are told to start again instead. */
+export class CursorExpiredError extends Error {
+  constructor(currentBuildId) {
+    super('The product list was updated while you were browsing. Loading it again.');
+    this.name = 'CursorExpiredError';
+    this.currentBuildId = currentBuildId || null;
+  }
+}
+
+/* Whatever build the pointer names right now. */
+async function getCurrentCatalog(ctx) {
+  const { store, cfg } = ctx;
   const env = cfg.environment;
 
   const pointer = await store.readCatalogPointer(env);
   if (!pointer?.buildId) throw new CatalogNotReadyError('no_snapshot');
+  const warm = warmBuilds.get(pointer.buildId);
+  if (warm) return warm;
 
-  if (warmCatalog && warmCatalog.buildId === pointer.buildId) return warmCatalog;
-
-  const snapshot = await store.readCatalogBuild(env, pointer.buildId, pointer.chunkCount);
-  if (!snapshot) {
-    /* The pointer names a build whose chunks will not read back. That should
-       be impossible now builds are published atomically, so it is logged as
-       the anomaly it is rather than quietly swallowed. */
+  const read = await store.readCatalogSnapshot(env);
+  if (!read || !read.snapshot) {
+    /* The pointer names a build whose chunks will not read back, and reading
+       again did not help. Builds are published atomically and kept for a
+       grace period after they are replaced, so this should not happen. */
     console.error('catalog_pointer_unreadable', JSON.stringify({ env, buildId: pointer.buildId }));
     throw new CatalogNotReadyError('unreadable');
   }
+  return rememberBuild({
+    snapshot: read.snapshot,
+    buildId: read.buildId,
+    fetchedAt: read.fetchedAt || null,
+    builtAt: Number(read.builtAt || 0) || null
+  });
+}
 
-  const builtAt = Number(pointer.builtAt || 0);
-  warmCatalog = {
-    snapshot,
-    buildId: pointer.buildId,
-    fetchedAt: pointer.fetchedAt || null,
-    builtAt: builtAt || null
-  };
-  return warmCatalog;
+/* One named build, for continuing a page run that started on it. */
+async function getPinnedCatalog(ctx, buildId) {
+  const { store, cfg } = ctx;
+  const env = cfg.environment;
+
+  const warm = warmBuilds.get(buildId);
+  if (warm) {
+    /* Having it in memory is not permission to serve it. Builds are kept for
+       a retention window after they are replaced, and once that has passed
+       and the build is deleted, every other container stops being able to
+       serve these pages. This one should answer the same way, rather than
+       being the single box that still hands out a build nobody else has. */
+    const retained = await store.readBuildLedger(env).catch(() => null);
+    if (retained && retained.length && !retained.some(b => b.id === buildId)) {
+      warmBuilds.delete(buildId);
+      const pointer = await store.readCatalogPointer(env).catch(() => null);
+      throw new CursorExpiredError(pointer?.buildId);
+    }
+    return warm;
+  }
+
+  const snapshot = await store.readCatalogBuild(env, buildId);
+  if (!snapshot) {
+    const pointer = await store.readCatalogPointer(env).catch(() => null);
+    throw new CursorExpiredError(pointer?.buildId);
+  }
+  /* The pointer only carries timings for the build it names, so an older
+     build's age comes from the timestamp inside the snapshot itself. */
+  const pointer = await store.readCatalogPointer(env).catch(() => null);
+  const live = pointer?.buildId === buildId;
+  return rememberBuild({
+    snapshot, buildId,
+    fetchedAt: (live ? pointer.fetchedAt : null) || snapshot.fetchedAt || null,
+    builtAt: live ? Number(pointer.builtAt || 0) || null : null
+  });
+}
+
+/* The cursor carries the build it belongs to, not just a position. An offset
+   on its own is meaningless once the catalog has been rebuilt underneath it:
+   page one from the old build plus page two from the new one is a list with
+   products repeated and products missing. */
+function encodeCursor(buildId, offset) { return buildId + '~' + offset; }
+
+function decodeCursor(raw) {
+  if (!raw) return { first: true };
+  const at = String(raw).indexOf('~');
+  /* No build in it: the pre-pinning format, or something hand-made. There is
+     no safe way to place it, so it is expired rather than guessed at. */
+  if (at < 1) return { invalid: true };
+  const buildId = raw.slice(0, at);
+  const offset = Number.parseInt(raw.slice(at + 1), 10);
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(buildId)) return { invalid: true };
+  if (!Number.isInteger(offset) || offset < 0) return { invalid: true };
+  return { buildId, offset };
 }
 
 /* Age is reported from when the build was taken, not from when this container
@@ -107,13 +180,21 @@ function freshness(entry, s) {
 
 async function handleCatalog(event, ctx) {
   const { s } = ctx;
-  const entry = await getCatalog(ctx);
+  const cursor = decodeCursor(query(event, 'cursor'));
+  if (cursor.invalid) {
+    const pointer = await ctx.store.readCatalogPointer(ctx.cfg.environment).catch(() => null);
+    throw new CursorExpiredError(pointer?.buildId);
+  }
+
+  const entry = cursor.first ? await getCurrentCatalog(ctx) : await getPinnedCatalog(ctx, cursor.buildId);
   const snapshot = entry.snapshot;
 
   const limit = Math.min(Math.max(Number.parseInt(query(event, 'limit') || '', 10) || s.catalogPageSize, 1), 300);
-  const offset = Math.max(Number.parseInt(query(event, 'cursor') || '', 10) || 0, 0);
+  const offset = cursor.first ? 0 : cursor.offset;
   const page = snapshot.products.slice(offset, offset + limit);
-  const next = offset + limit < snapshot.products.length ? String(offset + limit) : null;
+  const next = offset + limit < snapshot.products.length
+    ? encodeCursor(entry.buildId, offset + limit)
+    : null;
 
   return reply(200, event, {
     success: true,
@@ -217,7 +298,7 @@ async function handleCartValidate(event, ctx) {
   const { body, error } = parseJsonBody(event);
   if (error) return reply(400, event, { success: false, error: 'BAD_JSON', message: error }, { allowedOrigins: s.allowedOrigins });
 
-  const { snapshot } = await getCatalog(ctx);
+  const { snapshot } = await getCurrentCatalog(ctx);
   const result = await reconcileCart(body.lines, { snapshot, settings: s, store });
   if (!result.ok) {
     return reply(400, event, { success: false, error: result.error, message: result.message },
@@ -843,6 +924,14 @@ export const handler = async (event) => {
     const store = createStore({ tableName: s.tableName });
     return await route[2](event, { cfg, s, square, store });
   } catch (err) {
+    if (err instanceof CursorExpiredError) {
+      return reply(409, event, {
+        success: false, error: 'CATALOG_CURSOR_EXPIRED',
+        message: err.message,
+        buildId: err.currentBuildId,
+        requestId
+      }, { allowedOrigins: s.allowedOrigins });
+    }
     /* Checked by flag rather than by class, and before the general Square
        branch: a credential Square will not accept is a configuration fault,
        not something to hand the shopper a 401 about. */
@@ -894,4 +983,4 @@ export const handler = async (event) => {
 
 /* Exported for the tests, which drive the handlers directly with fakes rather
    than standing up DynamoDB and Square. */
-export const __internal = { getCatalog, handleCheckout, handleCatalog, handleWebhook, handleOrderStatus, handleCartValidate };
+export const __internal = { getCurrentCatalog, handleCheckout, handleCatalog, handleWebhook, handleOrderStatus, handleCartValidate };

@@ -86,12 +86,15 @@ test('GET /catalog serves the sellable catalog and paginates', async () => {
   assert.equal(a.total, 2);
   assert.equal(a.products.length, 1);
   assert.ok(a.categories, 'categories ride along on the first page');
-  assert.equal(a.cursor, '1');
+  /* The cursor names the build it belongs to, so page two cannot land on a
+     different generation of the catalog. */
+  assert.equal(a.cursor, a.buildId + '~1');
 
-  const second = await handler(ev('GET', '/catalog', { query: { limit: '1', cursor: '1' } }));
+  const second = await handler(ev('GET', '/catalog', { query: { limit: '1', cursor: a.cursor } }));
   const b = J(second);
   assert.equal(b.products.length, 1);
   assert.equal(b.cursor, null, 'the walk ends');
+  assert.equal(b.buildId, a.buildId, 'and both pages came from one build');
   assert.notEqual(a.products[0].id, b.products[0].id);
 });
 

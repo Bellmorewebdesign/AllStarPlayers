@@ -53,10 +53,20 @@ test('a half-written build is invisible: the old catalog keeps serving', async (
   assert.equal(read.snapshot.products.length, 50);
   assert.equal(read.unreadable, false);
 
-  /* And the next successful refresh sweeps the orphan away. */
+  /* The next successful refresh keeps the orphan for now: builds are held for
+     a retention window so a reader part-way through one is not stranded. */
   const third = await publish(store, 'production', bigSnapshot(60));
-  assert.equal(d.find('CATALOG#production#B' + buildId).length, 0, 'the abandoned build is gone');
+  assert.ok(d.find('CATALOG#production#B' + buildId).length > 0, 'not deleted from under a reader');
   assert.equal((await store.readCatalogSnapshot('production')).buildId, third.buildId);
+
+  /* Once it is older than the window, the next refresh does clear it. */
+  const ledger = d.find('CATALOG#production').find(r => r.sk === 'BUILDS');
+  const cold = Date.now() - 3 * 3600 * 1000;
+  ledger.builds = ledger.builds.map(b =>
+    b.id === third.buildId ? b : { ...b, startedAt: cold, supersededAt: cold });
+  const fourth = await publish(store, 'production', bigSnapshot(70));
+  assert.equal(d.find('CATALOG#production#B' + buildId).length, 0, 'the abandoned build is gone');
+  assert.equal((await store.readCatalogSnapshot('production')).buildId, fourth.buildId);
 });
 
 test('a build with fewer chunks than its predecessor is still readable', async () => {

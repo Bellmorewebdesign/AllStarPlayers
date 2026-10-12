@@ -56,30 +56,52 @@
   /* The catalog arrives a page at a time. The first page comes back quickly so
      the grid can draw, and the rest follow in the background, so the whole
      catalog ends up searchable rather than just the first screen of it. */
-  function fetchCatalog(onPage) {
-    var all = [];
-    var meta = null;
+  /* Walks every page of the catalog.
 
-    function page(cursor) {
-      var qs = cursor ? '?cursor=' + encodeURIComponent(cursor) : '';
-      return request('/catalog' + qs).then(function (data) {
-        if (!data || data.success !== true) throw new Error('The catalog service reported a problem.');
-        if (!meta) {
-          meta = {
-            total: data.total, categories: data.categories || [],
-            fetchedAt: data.fetchedAt, stale: data.stale === true,
-            ageSeconds: typeof data.ageSeconds === 'number' ? data.ageSeconds : null,
-            buildId: data.buildId || null,
-            environment: data.environment
-          };
-        }
-        all = all.concat(data.products || []);
-        if (onPage) onPage({ products: all, meta: meta, done: !data.cursor });
-        if (data.cursor) return page(data.cursor);
-        return { products: all, meta: meta };
-      });
+     Pages are pinned server-side to one build of the catalog, and the cursor
+     carries that build. If a refresh lands while we are part-way through, the
+     build we started on eventually goes away and the server answers 409
+     CATALOG_CURSOR_EXPIRED rather than handing us a page from the new one.
+     The only correct response is to throw away what we have and walk again
+     from the top: half of one catalog plus half of another is a list with
+     products missing and products repeated. */
+  function fetchCatalog(onPage) {
+    var RESTART_LIMIT = 3;
+
+    function walk(restarts) {
+      var all = [];
+      var meta = null;
+
+      function page(cursor) {
+        var qs = cursor ? '?cursor=' + encodeURIComponent(cursor) : '';
+        return request('/catalog' + qs).then(function (data) {
+          if (!data || data.success !== true) throw new Error('The catalog service reported a problem.');
+          if (!meta) {
+            meta = {
+              total: data.total, categories: data.categories || [],
+              fetchedAt: data.fetchedAt, stale: data.stale === true,
+              ageSeconds: typeof data.ageSeconds === 'number' ? data.ageSeconds : null,
+              buildId: data.buildId || null,
+              environment: data.environment
+            };
+          }
+          all = all.concat(data.products || []);
+          if (onPage) onPage({ products: all, meta: meta, done: !data.cursor });
+          if (data.cursor) return page(data.cursor);
+          return { products: all, meta: meta };
+        }, function (err) {
+          if (err && err.code === 'CATALOG_CURSOR_EXPIRED' && restarts < RESTART_LIMIT) {
+            /* Start over, and hand the caller the clean slate so a partly
+               drawn grid is not left with the old build's products in it. */
+            if (onPage) onPage({ products: [], meta: null, done: false, restarted: true });
+            return walk(restarts + 1);
+          }
+          throw err;
+        });
+      }
+      return page(null);
     }
-    return page(null);
+    return walk(0);
   }
 
   ASP.api = {

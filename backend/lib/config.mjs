@@ -172,6 +172,12 @@ export function settings() {
     catalogTtlSeconds: int('CATALOG_TTL_SECONDS', 900),
     catalogPageSize: int('CATALOG_PAGE_SIZE', 120),
 
+    /* How long a build that has been replaced is kept before deletion.
+       A browsing request reads the pointer and the chunks as two separate
+       calls, so deleting the old build the instant the new one lands strands
+       anybody in between. Must comfortably exceed the slowest such read. */
+    buildRetentionSeconds: int('BUILD_RETENTION_SECONDS', 900),
+
     /* How long the refresh lease lasts. It MUST be longer than the Lambda's
        own timeout, or a slow refresh would lose the lease while still
        running and a second one could start on top of it. */
