@@ -10,6 +10,8 @@
      TOKEN#<hash>   / RECORD               a return-page token -> order id
      EVENT#<id>     / RECORD               a webhook, and whether it finished
      HOLD#<varId>   / HOLDS                every live hold on one variation
+     SWEEP          / <dueAt>#<attemptId>  an abandoned checkout waiting to be
+                                           cancelled and have its stock freed
 
    On soft holds, plainly: a hold is not a reservation. Square has no way to
    reserve catalog stock for a hosted checkout, and the shop sells the same
@@ -20,6 +22,13 @@
    All the holds on one variation live in ONE row, which is what makes
    "is there room, and if so take it" a single atomic compare-and-swap rather
    than a read followed by a write that another Lambda can slip between.
+
+   A hold does NOT stop counting just because its clock ran out. A Square
+   payment link stays payable after we stop waiting for it, so freeing the
+   stock on a timer would mean selling a unit that an abandoned link can still
+   buy. An entry is only taken out of the row once the order behind it has been
+   confirmed cancelled, or confirmed paid. Until then it keeps holding, and
+   lib/cleanup.mjs is what resolves it.
    ========================================================================== */
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
@@ -64,6 +73,12 @@ export function tokensMatch(a, b) {
    checkout or a webhook recovers from a Lambda that was killed outright. */
 const INFLIGHT_MS = Number.parseInt(process.env.INFLIGHT_RECOVERY_MS || '15000', 10);
 const CAS_ATTEMPTS = 8;
+
+/* The last line of defence. If cleanup has not managed to settle a hold in
+   this long, something is badly wrong — but holding a unit off the shelf
+   forever is its own kind of broken, so the entry is dropped and the fact is
+   logged loudly for somebody to look at. */
+const HOLD_BACKSTOP_SECONDS = Number.parseInt(process.env.HOLD_BACKSTOP_SECONDS || String(7 * 86400), 10);
 
 export function createStore({ tableName, client } = {}) {
   if (!tableName) throw new StoreError('TABLE_NAME is not set on the function.');
@@ -200,13 +215,31 @@ export function createStore({ tableName, client } = {}) {
         }, { removeUndefinedValues: true }),
         ConditionExpression: 'attribute_not_exists(pk)'
       }));
-      return { claimed: true, record: null, statusToken };
+      return { claimed: true, record: null, statusToken, generation: 0 };
     } catch (err) {
       if (err?.name !== 'ConditionalCheckFailedException') throw err;
       const record = await get(pk, 'RECORD');
       if (!record) return { claimed: false, record: null };
 
       if (record.status === 'DONE') return { claimed: false, record, state: 'done' };
+
+      /* Cleanup cancelled the link this row points at. Replaying it would
+         hand the customer a dead checkout page. Start a new generation
+         instead, which also changes the Square idempotency key, so Square
+         makes a genuinely new link rather than returning the cancelled one. */
+      if (record.status === 'CANCELED') {
+        const generation = Number(record.generation || 0) + 1;
+        await ddb.send(new UpdateItemCommand({
+          TableName: tableName,
+          Key: marshall({ pk, sk: 'RECORD' }),
+          UpdateExpression: 'SET #s = :pending, generation = :g, statusToken = :tok, createdAt = :now REMOVE #r',
+          ExpressionAttributeNames: { '#s': 'status', '#r': 'result' },
+          ExpressionAttributeValues: marshall({
+            ':pending': 'PENDING', ':g': generation, ':tok': statusToken, ':now': Date.now()
+          }, { removeUndefinedValues: true })
+        }));
+        return { claimed: true, record, state: 'renewed', statusToken, generation };
+      }
 
       /* A PENDING row older than the in-flight window belonged to a request
          that is not coming back. Take it over, keeping its token. */
@@ -218,7 +251,9 @@ export function createStore({ tableName, client } = {}) {
           UpdateExpression: 'SET createdAt = :now',
           ExpressionAttributeValues: marshall({ ':now': Date.now() })
         })).catch(() => {});
-        return { claimed: true, record, state: 'recovered', statusToken: record.statusToken || statusToken };
+        return { claimed: true, record, state: 'recovered',
+                 statusToken: record.statusToken || statusToken,
+                 generation: Number(record.generation || 0) };
       }
       return { claimed: false, record, state: 'in_progress' };
     }
@@ -249,6 +284,18 @@ export function createStore({ tableName, client } = {}) {
       ExpressionAttributeValues: marshall({ ':zero': 0 }),
       ConditionExpression: 'attribute_exists(pk)'
     })).catch(err => console.error('idem_recoverable_failed', err?.message));
+  }
+
+  /* Called by cleanup once a link has been confirmed dead. */
+  async function markIdempotencyCanceled(key) {
+    await ddb.send(new UpdateItemCommand({
+      TableName: tableName,
+      Key: marshall({ pk: 'IDEM#' + key, sk: 'RECORD' }),
+      UpdateExpression: 'SET #s = :c, canceledAt = :now',
+      ExpressionAttributeNames: { '#s': 'status' },
+      ExpressionAttributeValues: marshall({ ':c': 'CANCELED', ':now': Date.now() }),
+      ConditionExpression: 'attribute_exists(pk)'
+    })).catch(err => console.error('idem_cancel_mark_failed', err?.message));
   }
 
   /* -------------------------------------------------------------- orders */
@@ -350,11 +397,23 @@ export function createStore({ tableName, client } = {}) {
      expiresAt has gone by, so a lapsed hold stops counting without anything
      having to sweep up after it. */
 
+  /* Everything still holding stock. Note what is NOT a reason to drop an
+     entry: its expiresAt having passed. That only means we have stopped
+     waiting for the customer, not that their payment link has stopped
+     working. Cleanup removes the entry once it has proof either way. */
   function liveEntries(row, { excludeAttempt } = {}) {
     const now = nowSec();
     const all = Array.isArray(row?.entries) ? row.entries : [];
-    return all.filter(e => e && Number(e.expiresAt) > now &&
-      (!excludeAttempt || e.attemptId !== excludeAttempt));
+    return all.filter(e => {
+      if (!e) return false;
+      if (Number(e.expiresAt) + HOLD_BACKSTOP_SECONDS <= now) {
+        console.error('hold_backstop_dropped', JSON.stringify({
+          attemptId: e.attemptId, qty: e.qty, expiresAt: e.expiresAt
+        }));
+        return false;
+      }
+      return !excludeAttempt || e.attemptId !== excludeAttempt;
+    });
   }
 
   async function heldQuantity(variationId, { excludeAttempt } = {}) {
@@ -364,7 +423,10 @@ export function createStore({ tableName, client } = {}) {
 
   async function writeHolds(variationId, row, entries) {
     const version = Number(row?.version || 0) + 1;
-    const maxExpiry = entries.reduce((m, e) => Math.max(m, Number(e.expiresAt) || 0), nowSec());
+    /* The row has to outlive its entries by the backstop, or DynamoDB would
+       delete the evidence before cleanup had finished with it. */
+    const maxExpiry = entries.reduce((m, e) => Math.max(m, Number(e.expiresAt) || 0), nowSec())
+      + HOLD_BACKSTOP_SECONDS;
     const item = {
       pk: 'HOLD#' + variationId, sk: 'HOLDS',
       version, entries, updatedAt: Date.now(),
@@ -454,8 +516,62 @@ export function createStore({ tableName, client } = {}) {
     }
   }
 
+  /* ------------------------------------------------------- the sweep queue */
+
+  /* Every checkout that takes a hold also leaves a note here saying when it
+     should be chased up. The sort key is the due time, so finding the work
+     is one Query with a range condition rather than a table scan — which is
+     also why the IAM policy needs no dynamodb:Scan.
+
+     One partition is plenty at this shop's volume: a row per checkout, gone
+     again within the hour. */
+  const SWEEP_PK = 'SWEEP';
+  const dueKey = (dueAt, attemptId) => String(dueAt).padStart(12, '0') + '#' + attemptId;
+
+  async function enqueueSweep(entry) {
+    const { dueAt, attemptId } = entry;
+    await put({
+      pk: SWEEP_PK, sk: dueKey(dueAt, attemptId),
+      ...entry,
+      attempts: entry.attempts || 0,
+      /* Outlives the backstop so cleanup never runs out of road before the
+         hold does. */
+      ttl: nowSec() + HOLD_BACKSTOP_SECONDS + 86400
+    });
+  }
+
+  async function dueSweeps({ now = nowSec(), limit = 25 } = {}) {
+    const res = await ddb.send(new QueryCommand({
+      TableName: tableName,
+      KeyConditionExpression: '#pk = :pk AND #sk < :sk',
+      ExpressionAttributeNames: { '#pk': 'pk', '#sk': 'sk' },
+      ExpressionAttributeValues: marshall({ ':pk': SWEEP_PK, ':sk': dueKey(now, '') }),
+      Limit: limit,
+      ConsistentRead: true
+    }));
+    return (res.Items || []).map(i => unmarshall(i));
+  }
+
+  async function deleteSweep(row) {
+    await ddb.send(new DeleteItemCommand({
+      TableName: tableName, Key: marshall({ pk: row.pk, sk: row.sk })
+    }));
+  }
+
+  /* Move a job later. The due time is in the sort key, so this is a write at
+     the new key followed by a delete of the old one — in that order, because
+     losing the job would leave stock held with nothing coming to free it. */
+  async function rescheduleSweep(row, { dueAt, patch = {} }) {
+    const next = { ...row, ...patch, dueAt };
+    delete next.pk; delete next.sk;
+    await enqueueSweep({ ...next, attemptId: row.attemptId, dueAt });
+    if (dueKey(dueAt, row.attemptId) !== row.sk) await deleteSweep(row);
+  }
+
   return {
     readCatalog, readCatalogStale, writeCatalog,
+    enqueueSweep, dueSweeps, deleteSweep, rescheduleSweep,
+    markIdempotencyCanceled,
     claimIdempotency, completeIdempotency, markIdempotencyRecoverable,
     saveOrder, getOrder, getOrderIdForToken, updateOrderStatus,
     beginWebhookEvent, completeWebhookEvent, releaseWebhookEvent,

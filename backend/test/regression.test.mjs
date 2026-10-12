@@ -553,7 +553,7 @@ test('a cancelled order releases its hold straight away', async () => {
   assert.equal(holdTotal(ddb, 'VAR_TEE_L'), 0, 'a cancelled order must put the stock back immediately');
 });
 
-test('an expired hold stops counting against the next shopper', async () => {
+test('an expired hold keeps holding until cleanup has settled it', async () => {
   const stock = stockTable();
   stock.set('VAR_HAT_A', 1);
   const link = stickyLink();
@@ -573,16 +573,18 @@ test('an expired hold stops counting against the next shopper', async () => {
   }));
   assert.equal(blocked.statusCode, 409, 'held by the first shopper');
 
-  /* Wind the hold into the past, the way the clock would. */
+  /* Wind the hold into the past. The first shopper's Square link is still
+     payable, so the unit must NOT go back on sale on a timer alone — that
+     was the overselling hole. */
   for (const row of ddb.find('HOLD#VAR_HAT_A')) {
-    if (Array.isArray(row.entries)) row.entries.forEach(e => { e.expiresAt = Math.floor(Date.now() / 1000) - 5; });
-    else row.ttl = Math.floor(Date.now() / 1000) - 5;
+    row.entries.forEach(e => { e.expiresAt = Math.floor(Date.now() / 1000) - 5; });
   }
 
-  const after = await handler(ev('POST', '/checkout', {
+  const stillBlocked = await handler(ev('POST', '/checkout', {
     body: { attemptId: 'attempt-expiry003', lines: [{ variationId: 'VAR_HAT_A', quantity: 1 }], fulfillment: PICKUP }
   }));
-  assert.equal(after.statusCode, 200, 'once the hold lapses the unit is available again: ' + after.body);
+  assert.equal(stillBlocked.statusCode, 409,
+    'the clock running out is not proof the link is dead: ' + stillBlocked.body);
 });
 
 /* ======================================================================

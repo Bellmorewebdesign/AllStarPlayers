@@ -164,6 +164,12 @@ export function settings() {
     holdSeconds: int('STOCK_HOLD_SECONDS', 900),
     holdsEnabled: bool('STOCK_HOLDS_ENABLED', true),
 
+    /* How long after a hold's clock runs out before cleanup goes near it.
+       The gap is deliberate: a customer on Square's page when the hold lapses
+       should be allowed to finish rather than have the link pulled from under
+       them. The stock stays held throughout. */
+    cleanupGraceSeconds: int('CLEANUP_GRACE_SECONDS', 180),
+
     maxCartLines: int('MAX_CART_LINES', 40),
     maxLineQuantity: int('MAX_LINE_QUANTITY', 20),
 

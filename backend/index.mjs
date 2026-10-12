@@ -11,6 +11,11 @@
      POST /checkout          build the order and get a Square checkout page
      GET  /order             what Square says about an order, by status token
      POST /webhooks/square   signed Square notifications
+     POST /admin/sweep       run the abandoned-checkout cleanup by hand
+
+   It is also invoked off an HTTP request entirely: EventBridge sends
+   { task: 'sweep-abandoned-checkouts' } on a schedule to cancel abandoned
+   payment links and free the stock they were holding. See lib/cleanup.mjs.
 
    The Square access token lives in Secrets Manager and never appears in a
    response, a log line or the frontend. Prices always come from Square's
@@ -30,6 +35,7 @@ import { createStore, sha256, newToken, StoreError } from './lib/store.mjs';
 import { reconcileCart, cartFingerprint } from './lib/cart.mjs';
 import { validateFulfillment } from './lib/fulfillment.mjs';
 import { buildOrder, createPaymentLink, readOrderStatus } from './lib/checkout.mjs';
+import { sweepAbandonedCheckouts } from './lib/cleanup.mjs';
 import { verifySignature, interpret, shouldApply, SIGNATURE_HEADER, isTerminal } from './lib/webhook.mjs';
 import {
   methodOf, routePath, rawBody, header, query, reply, parseJsonBody, corsHeaders
@@ -244,6 +250,16 @@ async function handleCheckout(event, ctx) {
   }
   const statusToken = claim.statusToken;
   const recovering = claim.state === 'recovered';
+  const renewed = claim.state === 'renewed';
+
+  /* Our row key stays the same so the attempt can always be found again. The
+     key Square sees carries a generation, bumped whenever cleanup has killed
+     the previous link — otherwise Square's own idempotency would hand back
+     the dead one. */
+  const generation = Number(claim.generation || 0);
+  const squareIdempotencyKey = generation === 0
+    ? idemKey
+    : createHash('sha256').update(idemKey + '::g' + generation).digest('hex');
 
   const taxIndex = new Map((verified.taxes || []).filter(t => t.enabled).map(t => [t.id, t]));
 
@@ -304,7 +320,7 @@ async function handleCheckout(event, ctx) {
        hands back the link it already made rather than making a second one. */
     const link = await createPaymentLink(square, {
       order,
-      idempotencyKey: idemKey,
+      idempotencyKey: squareIdempotencyKey,
       returnUrl,
       description: s.storeName + ' online order'
     });
@@ -346,10 +362,26 @@ async function handleCheckout(event, ctx) {
 
     await store.completeIdempotency(idemKey, record);
 
+    /* The hold now outlives its own clock on purpose, so something has to
+       come back and settle it. Queue that before answering: a checkout whose
+       cleanup job went missing would hold stock until the backstop. */
+    if (s.holdsEnabled && heldVariationIds.length) {
+      await store.enqueueSweep({
+        attemptId,
+        dueAt: Math.floor(Date.now() / 1000) + s.holdSeconds + s.cleanupGraceSeconds,
+        orderId: link.orderId,
+        paymentLinkId: link.paymentLinkId,
+        idemKey,
+        variationIds: heldVariationIds,
+        createdAt: Date.now()
+      }).catch(err => console.error('sweep_enqueue_failed', attemptId, err?.message));
+    }
+
     return reply(200, event, {
       success: true,
       ...record,
       ...(recovering ? { recovered: true } : {}),
+      ...(renewed ? { renewed: true } : {}),
       /* Said plainly, because the next thing that happens is a redirect and
          a redirect proves nothing. */
       paymentConfirmed: false,
@@ -529,12 +561,31 @@ async function handleWebhook(event, ctx) {
   }
 }
 
+/* ------------------------------------------------------------- cleanup */
+
+/* Normally driven by EventBridge on a schedule. This route is for running it
+   by hand while setting the shop up, and for the sandbox checks. */
+async function handleSweepRoute(event, ctx) {
+  const { cfg, s, square, store } = ctx;
+  if (!cfg.adminKey) {
+    return reply(404, event, { success: false, error: 'NOT_FOUND', message: 'Sweep is switched off.' },
+      { allowedOrigins: s.allowedOrigins });
+  }
+  if (sha256(header(event, 'x-admin-key') || '') !== sha256(cfg.adminKey)) {
+    return reply(403, event, { success: false, error: 'FORBIDDEN', message: 'Wrong admin key.' },
+      { allowedOrigins: s.allowedOrigins });
+  }
+  const tally = await sweepAbandonedCheckouts({ square, store, settings: s });
+  return reply(200, event, { success: true, swept: tally }, { allowedOrigins: s.allowedOrigins });
+}
+
 /* ----------------------------------------------------------------- entry */
 
 const ROUTES = [
   ['GET',  '/config',          (e, c) => reply(200, e, { success: true, config: publicConfig(c.cfg, c.s) }, { allowedOrigins: c.s.allowedOrigins, cache: 'public, max-age=120' })],
   ['GET',  '/catalog',         handleCatalog],
   ['POST', '/catalog/refresh', handleRefresh],
+  ['POST', '/admin/sweep',     handleSweepRoute],
   ['POST', '/cart/validate',   handleCartValidate],
   ['POST', '/checkout',        handleCheckout],
   ['GET',  '/order',           handleOrderStatus],
@@ -542,6 +593,17 @@ const ROUTES = [
 ];
 
 export const handler = async (event) => {
+  /* EventBridge calls this function directly with a plain object rather than
+     an HTTP request, so the cleanup sweep needs no public route and no
+     internet-facing surface of its own. */
+  if (event && event.task === 'sweep-abandoned-checkouts') {
+    const s = settings();
+    const cfg = await loadSecrets();
+    const square = createSquareClient(cfg);
+    const store = createStore({ tableName: s.tableName });
+    return sweepAbandonedCheckouts({ square, store, settings: s });
+  }
+
   const method = methodOf(event);
   const path = routePath(event);
   const s = settings();

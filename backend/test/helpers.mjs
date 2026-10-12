@@ -80,8 +80,13 @@ export function fakeDynamo({ delay = false, failOnce = null, rows: seed } = {}) 
       if (name === 'QueryCommand') {
         const values = unmarshall(input.ExpressionAttributeValues);
         const pk = values[':pk'];
-        const items = [...rows.values()].filter(r => r.pk === pk)
+        let items = [...rows.values()].filter(r => r.pk === pk)
           .sort((a, b) => String(a.sk).localeCompare(String(b.sk)));
+        /* The sweep queue reads a range of the sort key. */
+        if (/#sk <\s*:sk/.test(input.KeyConditionExpression || '')) {
+          items = items.filter(r => String(r.sk) < String(values[':sk']));
+        }
+        if (input.Limit) items = items.slice(0, input.Limit);
         return { Items: items.map(i => marshall(i, { removeUndefinedValues: true })) };
       }
 

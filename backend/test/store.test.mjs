@@ -153,13 +153,30 @@ test('holds add up, exclude their own attempt and expire', async () => {
   assert.equal(await store.heldQuantity('V1'), 5);
   assert.equal(await store.heldQuantity('V1', { excludeAttempt: 'a1' }), 3);
 
-  /* A lapsed hold stops counting without anything having to sweep it up. */
+  /* A lapsed hold keeps holding: the payment link behind it is still live
+     until cleanup has killed it. Only an explicit release frees the stock. */
   const row = d.find('HOLD#V1')[0];
   row.entries.find(e => e.attemptId === 'a2').expiresAt = Math.floor(Date.now() / 1000) - 1;
-  assert.equal(await store.heldQuantity('V1'), 2);
+  assert.equal(await store.heldQuantity('V1'), 5, 'still held after the clock ran out');
 
+  await store.releaseHolds('a2', ['V1']);
+  assert.equal(await store.heldQuantity('V1'), 2);
   await store.releaseHolds('a1', ['V1']);
   assert.equal(await store.heldQuantity('V1'), 0);
+});
+
+test('the backstop eventually drops a hold nothing ever settled', async () => {
+  const { d, store } = mk();
+  await store.acquireHolds('forgotten', [{ variationId: 'VB', quantity: 1 }],
+    { availability: new Map([['VB', 5]]) });
+  assert.equal(await store.heldQuantity('VB'), 1);
+
+  /* Far enough past the backstop that holding the unit forever is the worse
+     of the two problems. */
+  d.find('HOLD#VB')[0].entries.forEach(e => {
+    e.expiresAt = Math.floor(Date.now() / 1000) - (8 * 86400);
+  });
+  assert.equal(await store.heldQuantity('VB'), 0);
 });
 
 test('a hold is refused when there is no room, and takes nothing', async () => {

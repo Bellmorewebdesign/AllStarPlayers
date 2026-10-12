@@ -19,7 +19,7 @@ configured is **unavailable**, not free.
 
 | # | Setting | Where it goes | What happens without it |
 | --- | --- | --- | --- |
-| 1 | **Production Square access token** | secret `SQUARE_ACCESS_TOKEN` | nothing works |
+| 1 | **Production Square access token**, with ORDERS_READ and ORDERS_WRITE | secret `SQUARE_ACCESS_TOKEN` | nothing works; without ORDERS_WRITE, abandoned links cannot be cancelled |
 | 2 | **Production location ID** — the real shop, see §3 | secret `SQUARE_LOCATION_ID` | nothing works |
 | 3 | **Webhook signature key** | secret `SQUARE_WEBHOOK_SIGNATURE_KEY` | order status still works by polling; webhooks are refused |
 | 4 | **Shipping rates and zones** | env `SHIPPING_RATES` | shipping is not offered at all |
@@ -178,6 +178,11 @@ Commas inside the JSON need escaping on the CLI; the console is easier for
 | `APPLY_CATALOG_TAXES` | `true` | attach the shop's own Square tax rules to the order |
 | `SQUARE_ASK_FOR_SHIPPING_ADDRESS` | `false` | see §7 |
 | `INFLIGHT_RECOVERY_MS` | 15000 | how long a half-finished checkout or webhook is left alone before another request takes it over |
+| `CLEANUP_GRACE_SECONDS` | 180 | how long after a hold lapses before cleanup goes near the link |
+| `CLEANUP_MAX_ATTEMPTS` | 12 | tries at cancelling one link before it is flagged for a person |
+| `CLEANUP_BATCH_SIZE` | 25 | jobs per sweep run |
+| `CLEANUP_FORCE_CANCEL_ORDER` | `false` | fallback that cancels the order directly if deleting the link does not — **unverified, see §9b** |
+| `HOLD_BACKSTOP_SECONDS` | 604800 | absolute last resort: a hold nothing ever settled is dropped after this, loudly |
 | `ORDER_RETENTION_DAYS` | 90 | how long order rows live |
 | `MAX_CART_LINES` / `MAX_LINE_QUANTITY` | 40 / 20 | ceilings |
 
@@ -217,6 +222,11 @@ The function reads one secret and uses one table. Nothing else.
 No `dynamodb:Scan`, no `secretsmanager:*`, no wildcard resources. The sandbox
 role is the same with `sandbox` substituted.
 
+The cleanup sweep (§9a) needs nothing extra: it finds its work with a Query
+against a known partition key, which is why there is still no Scan here. On
+the Square side it needs the token to carry **ORDERS_READ and ORDERS_WRITE**,
+which deleting a payment link requires.
+
 ## 7. API Gateway: routes, CORS and the stage prefix
 
 Reuse the existing HTTP API `n9ecaydkv4` for sandbox if you like; make a
@@ -236,7 +246,7 @@ INT=$(aws apigatewayv2 create-integration --api-id $API --region us-east-1 \
 
 for ROUTE in "GET /config" "GET /catalog" "POST /catalog/refresh" \
              "POST /cart/validate" "POST /checkout" "GET /order" \
-             "POST /webhooks/square"; do
+             "POST /webhooks/square" "POST /admin/sweep"; do
   aws apigatewayv2 create-route --api-id $API --region us-east-1 \
     --route-key "$ROUTE" --target "integrations/$INT"
 done
@@ -332,42 +342,130 @@ rate limits, but it is the thing to look at first if you ever see 429s.
 
 ## 9. Overselling — what is and is not protected
 
-Plainly: **a stock check is not a reservation, and this does not guarantee
-stock.** What follows is exactly how far it goes.
+Plainly: **a stock check is not a reservation.** What follows is exactly how
+far it goes.
 
-**What is protected.** Every hold on a variation lives in one DynamoDB row,
+**Two shoppers at once.** Every hold on a variation lives in one DynamoDB row,
 and taking a hold is a single conditional write against that row's version.
 Two Lambdas racing for the last unit cannot both read "one available" and both
 write a hold: the loser's write is rejected, it re-reads, and it sees the
-winner. One gets a payment link; the other is told the item has gone. A cart
-is held all-or-nothing, so nobody ends up half-reserved. Holds expire after
-`STOCK_HOLD_SECONDS` (15 minutes) and are dropped as they are read, so nothing
-has to sweep up after them, and they are released the moment an order is paid
-or cancelled.
+winner. A cart is held all-or-nothing.
 
-**What is not protected, and cannot be without more work:**
+**An abandoned checkout.** This used to be the hole. A Square payment link
+does not expire, so freeing the stock when the hold's clock ran out meant
+offering a unit that somebody could still buy from a tab opened yesterday.
 
-- **An in-store sale.** The shop sells the same rail to whoever is standing
-  there. Square has no API to reserve catalog stock for a hosted checkout.
-- **A hold lapsing before payment.** If a customer sits on Square's checkout
-  page for more than fifteen minutes, their hold goes and the unit is offered
-  to the next person.
-- **A stale payment link.** This is the sharp one. A Square payment link does
-  not expire. Someone who opened a checkout yesterday, abandoned it, and pays
-  from that old link today will be charged, whatever the shelf looks like
-  now — the availability check happens when the link is made, not when it is
-  paid. Nothing in Square's hosted checkout lets us re-check at payment time.
+So the hold no longer lapses on a timer. It keeps holding until the order
+behind it has been **confirmed** cancelled or **confirmed** paid — see §9a for
+how that is done and §9b for what to verify in sandbox.
 
-For all three, Square takes the payment and staff deal with it as a refund or
-a backorder, the same as any shop. If that is not acceptable, the supported
-way forward is Square's inventory adjustment API: move the stock into a held
-state when the checkout is created and move it back when the hold lapses,
-with a scheduled reconciliation for the ones that fall through. That is a real
-piece of work with its own failure modes, and it is not built here.
+The cost of that is honest and worth knowing: an abandoned cart keeps its
+stock off the website for `STOCK_HOLD_SECONDS` + `CLEANUP_GRACE_SECONDS` +
+however long until the next sweep. With the defaults and a five-minute
+schedule that is about twenty minutes. Shorten `STOCK_HOLD_SECONDS` if that is
+too long for a busy line, but not below the time it takes somebody to find
+their card.
+
+**An in-store sale — still not protected, and cannot be.** The shop sells the
+same rail to whoever is standing in front of it, and Square offers no way to
+reserve catalog stock for a hosted checkout. If the last one goes over the
+counter while a web customer is paying, Square takes the payment and staff
+deal with it as a refund or a backorder, exactly as any shop would. Nothing
+here changes that, and nothing here claims to.
+
+The supported way to close that last gap is Square's inventory adjustment API:
+move stock into a held state when the checkout is created and move it back
+when the hold is released, with a scheduled reconciliation for whatever falls
+through. That is a real piece of work with its own failure modes. It is not
+built, and the site does not imply it is.
 
 Inventory is never adjusted by this code. Square decrements catalog stock
 itself when an order with catalog line items is paid, so touching it here
 would take the same units off the shelf twice.
+
+## 9a. The cleanup sweep
+
+`lib/cleanup.mjs`, run on a schedule. For each checkout whose hold has lapsed:
+
+1. **Ask Square what the order is doing.**
+2. **Paid?** Square has taken the stock down itself — free our hold, done.
+   **Already cancelled?** Free the hold, done.
+3. **A tender on a live order?** Money is moving through it right now. Leave
+   it completely alone and look again shortly.
+4. **Still live?** `DELETE /v2/online-checkout/payment-links/{id}`, then **ask
+   Square again**.
+5. **Confirmed cancelled or paid on that second read?** Free the hold.
+   **Anything else?** The hold stays and the job comes back later.
+
+Step 5 is the important one, and it is not paranoia. Square's reference says
+deleting a link sets its order to CANCELED and returns `cancelled_order_id`.
+There are unresolved reports on Square's own developer forums of that not
+happening — a 200 with no `cancelled_order_id`, the order still live, and a
+customer paying hours later. Trusting the delete would put the hole straight
+back, so the delete is treated as a request and the re-read as the answer.
+
+A job that will not settle is retried on a backoff and then flagged
+`stuck: true` in the table with a `cleanup_stuck_needs_a_person` log line. Its
+stock stays held, deliberately: a live payment link nobody can cancel is worse
+than a unit off the website. `HOLD_BACKSTOP_SECONDS` is the last resort and
+logs loudly when it fires.
+
+### Wiring the schedule
+
+EventBridge invokes the function directly with a plain object, so the sweep has
+no public route and no internet-facing surface:
+
+```bash
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+FN=all-star-players-store-production
+
+aws events put-rule --name "${FN}-sweep" --region us-east-1 \
+  --schedule-expression "rate(5 minutes)" --state ENABLED
+
+aws lambda add-permission --function-name "$FN" --region us-east-1 \
+  --statement-id events-sweep --action lambda:InvokeFunction \
+  --principal events.amazonaws.com \
+  --source-arn "arn:aws:events:us-east-1:${ACCOUNT_ID}:rule/${FN}-sweep"
+
+aws events put-targets --rule "${FN}-sweep" --region us-east-1 \
+  --targets "Id=1,Arn=arn:aws:lambda:us-east-1:${ACCOUNT_ID}:function:${FN},Input='{\"task\":\"sweep-abandoned-checkouts\"}'"
+```
+
+Repeat with `sandbox` in place of `production`.
+
+To run it by hand while setting up, or during the sandbox checks:
+
+```bash
+curl -s -X POST -H "x-admin-key: $ADMIN_REFRESH_KEY" \
+  https://$API.execute-api.us-east-1.amazonaws.com/default/admin/sweep
+```
+
+Watch for `cleanup_sweep` (a per-run tally), `cleanup_link_would_not_die` (a
+delete that did not cancel) and `cleanup_stuck_needs_a_person` in CloudWatch.
+A metric filter on the last two is worth setting up before launch.
+
+## 9b. What to verify about DeletePaymentLink — in sandbox, before launch
+
+This is the part that could not be checked from here: Square is unreachable
+from the environment this was built in, so **none of the following has been
+run against a real Square account.** It is all mocked in
+`backend/test/cleanup.test.mjs`, including the failure modes.
+
+Do these in sandbox:
+
+1. Create a checkout, do not pay, make the hold lapse (set
+   `STOCK_HOLD_SECONDS=60` temporarily), run the sweep by hand.
+2. Check the delete response in the logs: does it carry `cancelled_order_id`?
+3. In the Square sandbox dashboard, is the order **CANCELED**?
+4. Open the old checkout URL. Does Square refuse it?
+5. Is the stock available on the website again?
+
+If 2–4 do not behave — the forum reports say they sometimes do not — then set
+`CLEANUP_FORCE_CANCEL_ORDER=true`, which makes cleanup also try
+`PUT /v2/orders/{id}` with `state: CANCELED` before re-reading. That fallback
+is **off by default and unverified**; the re-read still decides, so turning it
+on cannot cause a bad release either way. If neither works, the stock stays
+held and the job is flagged, which is the safe failure.
 
 ## 10. Webhooks
 
@@ -451,6 +549,17 @@ Do all of these in sandbox before touching production.
     have it afterwards.
 18. **A redelivered webhook.** Replay one from the Square dashboard; the order
     must not change twice and the response must be a 200.
+19. **An abandoned checkout.** The five steps in §9b. This is the one to do
+    most carefully, because it is the only part of the system whose Square
+    behaviour is reported to be unreliable.
+20. **Stock is not freed early.** Start a checkout, let the hold lapse, and
+    before running the sweep check that the item still reads as unavailable
+    on the website. Freeing it at that point would be the bug.
+21. **A stale checkout page.** Leave Square's checkout open in one tab, run
+    the sweep, then try to pay from that tab. Square should refuse it. Then
+    check out again from the cart: a new link, which does work.
+22. **The schedule.** Confirm the EventBridge rule is firing and
+    `cleanup_sweep` appears in CloudWatch every five minutes.
 
 ## Going live
 
@@ -463,5 +572,10 @@ Do all of these in sandbox before touching production.
 
 Everything is serverless and on-demand. The catalog is cached in DynamoDB and
 in Lambda memory, so browsing costs no Square calls at all; only a checkout
-does, and then two or three of them (§8a). At this shop's volume expect the AWS bill to be cents a month;
+does, and then two or three of them (§8a).
+
+The cleanup sweep adds one scheduled invocation every five minutes — about
+8,600 a month, which is inside the Lambda free tier and costs a few cents
+beyond it. A run with nothing to do is one DynamoDB Query and no Square calls
+at all. At this shop's volume expect the AWS bill to be cents a month;
 the Secrets Manager secret (about $0.40/month each) is the largest fixed line.

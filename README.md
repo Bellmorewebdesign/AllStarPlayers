@@ -85,8 +85,13 @@ order.html   what Square decided   -> js/order-page.js
   asks our API, which asks Square, and says "checking" until it knows.
 - **Two shoppers cannot be sold the same last unit.** Holds on a variation
   live in one row and are taken with a single conditional write, so the race
-  is settled by DynamoDB rather than by luck. What that does *not* cover is
-  written down in `backend/DEPLOY.md` §9 rather than glossed over.
+  is settled by DynamoDB rather than by luck.
+- **Stock is never freed on a timer.** A Square payment link does not expire,
+  so a hold that merely ran out of clock is not proof of anything. A scheduled
+  sweep cancels the abandoned link first and re-asks Square whether it really
+  died; only then does the unit go back on the website. What that still does
+  *not* cover — a sale over the counter — is written down in
+  `backend/DEPLOY.md` §9 rather than glossed over.
 - **Buy Now never empties your cart**, even when you buy something that is
   already in it.
 - **Nothing is promised that is not built.** No UPS rates, no tracking numbers,
@@ -130,7 +135,8 @@ backend/
   lib/fulfillment.mjs  pickup and shipping validation, configured rates
   lib/checkout.mjs     building the Square order and the payment link
   lib/webhook.mjs      signature verification and event interpretation
-  test/                110 checks against a fake Square and an in-memory DynamoDB
+  lib/cleanup.mjs      cancels abandoned payment links, then frees their stock
+  test/                128 checks against a fake Square and an in-memory DynamoDB
 ```
 
 ```bash
