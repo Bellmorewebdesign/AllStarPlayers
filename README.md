@@ -155,6 +155,12 @@ rules it enforces: the photograph must show the actual item, and its licence
 must permit a storefront. `node tools/product-images.mjs` reports where the
 catalog stands; `--check` validates the manifest.
 
+`tools/image-finder/` is a local Python application for filling that manifest:
+it imports the catalog from the public API, searches image providers, and shows
+the candidates for a person to approve or reject. It uses no AI model, runs on
+your own machine, and publishes nothing — read its README before setting up a
+provider, because two of the four cost money.
+
 ### The cart
 
 `js/cart.js` keeps `{variationId, quantity}` pairs in `localStorage` under
@@ -272,6 +278,7 @@ js/
 tools/
   build-media.sh        Regenerates assets/img and assets/video from the originals
   product-images.mjs    Photograph coverage, and validates assets/products
+  image-finder/         A local Python app for sourcing the missing photographs
 backend/
   index.mjs             The store API Lambda
   lib/                  Its modules

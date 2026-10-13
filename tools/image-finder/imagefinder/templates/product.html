@@ -1,0 +1,237 @@
+{% extends "base.html" %}
+{% block title %}{{ product.name }}{% endblock %}
+{% block body %}
+<a class="back" href="{{ url_for('product_list') }}">← products</a>
+
+<h1>{{ product.name }}</h1>
+<p class="muted">{{ product.square_id }}</p>
+
+<section class="facts">
+  <div><span>Category</span><b>{{ product.category_names or '—' }}</b></div>
+  <div><span>Colours</span><b>{{ product.colors or '—' }}</b></div>
+  <div><span>Sizes</span><b>{{ product.sizes or '—' }}</b></div>
+  <div><span>SKU</span><b>{{ product.skus or '—' }}</b></div>
+  <div><span>Brand read from the name</span><b>{{ hints.brand or '—' }}</b></div>
+  <div><span>Square photographs</span><b>{{ product.square_image_count }}</b></div>
+</section>
+
+<section class="panel">
+  <h2>Searches</h2>
+  {% if hints.vague %}
+    <p class="warn">
+      This name is made of generic words, so a plain search will return a
+      thousand unrelated garments. Add a brand, a style code or a distinctive
+      detail before searching.
+    </p>
+  {% endif %}
+  <p class="fine">
+    One per line. Generated from the name, the brand when the name carries one,
+    the SKU and the first colour — edit them freely, they are only strings.
+  </p>
+  <textarea id="queries" rows="4" spellcheck="false">{{ queries | map(attribute='text') | join('\n') }}</textarea>
+
+  <div class="row">
+    <label class="check"><input type="checkbox" id="refresh"> ignore the cache (costs a fresh search)</label>
+    <button id="search" class="btn">Find candidates</button>
+    <button id="skip" class="btn btn--quiet">Skip this product</button>
+    <span id="search-status" class="status"></span>
+  </div>
+  <div id="outcomes" class="outcomes"></div>
+</section>
+
+<section class="panel">
+  <h2>Your own photograph</h2>
+  <p class="fine">Straight from the shop's camera. It becomes a candidate like any other.</p>
+  <form id="upload" class="row" enctype="multipart/form-data">
+    <input type="file" name="file" accept="image/*" required>
+    <input type="text" name="credit" placeholder="credit (default: All Star Players)">
+    <button class="btn btn--sm">Upload</button>
+    <span id="upload-status" class="status"></span>
+  </form>
+</section>
+
+<h2 class="candidates-head">Candidates <span id="candidate-count">({{ candidates|length }})</span></h2>
+<p class="fine">
+  Ranking is not evidence. Nothing here is published, or even downloaded, until
+  you approve it and say how you checked that it is this exact item.
+</p>
+<div id="candidates" class="candidates"></div>
+
+{% if next_id %}
+  <a class="btn btn--quiet next" href="{{ url_for('product_detail', square_id=next_id) }}">Next product needing a photo →</a>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+const SQUARE_ID = {{ product.square_id | tojson }};
+const PRODUCT_NAME = {{ product.name | tojson }};
+let candidates = {{ candidates | tojson }};
+
+/* Provider errors can be a paragraph of stack-trace; the whole thing is in
+   the database, and the page only needs the first line of it. */
+function short(text, limit = 160) {
+  const once = String(text).split('\n')[0];
+  return once.length > limit ? once.slice(0, limit) + '…' : once;
+}
+
+function queriesFromBox() {
+  return document.getElementById('queries').value.split('\n').map(s => s.trim()).filter(Boolean);
+}
+
+function licenceTag(c) {
+  if (c.license_status === 'known' && c.license) return `<span class="tag tag--ok">${esc(c.license)}</span>`;
+  return `<span class="tag tag--unknown">usage rights unknown</span>`;
+}
+
+function decisionTag(c) {
+  if (c.decision === 'approved') return `<span class="tag tag--ok">approved${c.is_main ? ' · main' : ''}</span>`;
+  if (c.decision === 'rejected') return `<span class="tag">rejected</span>`;
+  return '';
+}
+
+function downloadTag(c) {
+  if (!c.download_status) return '';
+  if (c.download_status === 'ok') return `<span class="tag tag--ok">downloaded</span>`;
+  if (c.download_status === 'download_blocked') return `<span class="tag tag--warn">download blocked (${esc(c.download_error || '')})</span>`;
+  return `<span class="tag tag--bad">download failed (${esc(c.download_error || '')})</span>`;
+}
+
+function card(c) {
+  const dims = (c.width && c.height) ? `${c.width}×${c.height}` : 'size unknown';
+  const thumb = c.download_status === 'ok' ? `/file/${c.id}` : (c.thumb_url || c.image_url);
+  return `
+  <article class="cand ${c.decision ? 'cand--' + c.decision : ''}" data-id="${c.id}">
+    <div class="cand__media">
+      <img src="${esc(thumb)}" alt="" loading="lazy"
+           onerror="this.closest('.cand__media').classList.add('is-broken')">
+      <div class="cand__broken">thumbnail would not load</div>
+    </div>
+    <div class="cand__body">
+      <p class="cand__title">${esc(c.title || '(no title)')}</p>
+      <p class="cand__meta">
+        <span class="tag">${esc(c.provider)}</span>
+        <span>${dims}</span>
+        ${licenceTag(c)} ${decisionTag(c)} ${downloadTag(c)}
+      </p>
+      <p class="cand__links">
+        ${c.source_page ? `<a href="${esc(c.source_page)}" target="_blank" rel="noopener">source page ↗</a>` : '<span class="muted">no source page</span>'}
+        <a href="${esc(c.image_url)}" target="_blank" rel="noopener">full image ↗</a>
+        ${c.creator ? `<span class="muted">by ${esc(c.creator)}</span>` : ''}
+      </p>
+      ${c.query ? `<p class="cand__query muted">found with “${esc(c.query)}”</p>` : ''}
+
+      <div class="cand__decide">
+        <label class="check">
+          <input type="checkbox" class="c-match" ${c.match_confirmed ? 'checked' : ''}>
+          I opened the source and this is the same item — brand, model and colour
+        </label>
+        <input class="c-note" type="text" placeholder="how you checked (goes into the manifest)"
+               value="${esc(c.match_note || '')}">
+        <label class="rights">Usage rights
+          <select class="c-rights">
+            <option value="unknown" ${(!c.rights_status || c.rights_status==='unknown') ? 'selected' : ''}>unknown — do not publish</option>
+            <option value="permitted" ${c.rights_status==='permitted' ? 'selected' : ''}>permitted for a storefront</option>
+            <option value="not_permitted" ${c.rights_status==='not_permitted' ? 'selected' : ''}>not permitted</option>
+          </select>
+        </label>
+        <input class="c-rights-note" type="text" placeholder="licence or permission, in your words"
+               value="${esc(c.rights_note || '')}">
+        <div class="row">
+          <button class="btn btn--sm act-approve">Approve</button>
+          <button class="btn btn--sm btn--quiet act-reject">Reject</button>
+          <button class="btn btn--sm btn--quiet act-main" ${c.decision === 'approved' ? '' : 'disabled'}>Make main</button>
+        </div>
+        <p class="cand__status"></p>
+      </div>
+    </div>
+  </article>`;
+}
+
+function render() {
+  document.getElementById('candidates').innerHTML =
+    candidates.length ? candidates.map(card).join('')
+                      : '<p class="empty">No candidates yet. Run a search, or upload your own photograph.</p>';
+  document.getElementById('candidate-count').textContent = `(${candidates.length})`;
+  wire();
+}
+
+function wire() {
+  document.querySelectorAll('.cand').forEach(el => {
+    const id = Number(el.dataset.id);
+    const status = el.querySelector('.cand__status');
+    const read = () => ({
+      match_confirmed: el.querySelector('.c-match').checked,
+      match_note: el.querySelector('.c-note').value.trim(),
+      rights_status: el.querySelector('.c-rights').value,
+      rights_note: el.querySelector('.c-rights-note').value.trim(),
+    });
+
+    el.querySelector('.act-approve').addEventListener('click', async () => {
+      const body = { decision: 'approved', ...read(), is_main: !candidates.some(c => c.is_main) };
+      status.textContent = 'Approving and downloading…';
+      const data = await postJSON(`/api/candidate/${id}/decide`, body);
+      if (!data.ok) { status.textContent = data.message; return; }
+      candidates = data.candidates;
+      render();
+    });
+
+    el.querySelector('.act-reject').addEventListener('click', async () => {
+      const data = await postJSON(`/api/candidate/${id}/decide`, { decision: 'rejected', ...read() });
+      if (!data.ok) { status.textContent = data.message; return; }
+      candidates = data.candidates; render();
+    });
+
+    el.querySelector('.act-main').addEventListener('click', async () => {
+      const data = await postJSON(`/api/candidate/${id}/main`, {});
+      if (!data.ok) { status.textContent = data.message; return; }
+      candidates = data.candidates; render();
+    });
+  });
+}
+
+document.getElementById('search').addEventListener('click', async (e) => {
+  const btn = e.currentTarget, status = document.getElementById('search-status');
+  btn.disabled = true; status.textContent = 'Searching…';
+  try {
+    const data = await postJSON(`/api/product/${SQUARE_ID}/search`, {
+      queries: queriesFromBox(),
+      refresh: document.getElementById('refresh').checked,
+    });
+    candidates = data.candidates || [];
+    render();
+    status.textContent = `${data.new} new, ${data.total} in total${data.note ? ' — ' + data.note : ''}`;
+    document.getElementById('outcomes').innerHTML = (data.outcomes || []).map(o => `
+      <div class="outcome outcome--${o.outcome}">
+        <b>${esc(o.provider)}</b> · “${esc(o.query)}” ·
+        ${esc(o.outcome.replace(/_/g, ' '))}${o.cached ? ' (from cache, nothing spent)' : ''}
+        ${o.error_detail ? '· ' + esc(short(o.error_detail)) : ''}
+      </div>`).join('');
+  } catch (err) {
+    status.textContent = 'Search failed: ' + err.message;
+  } finally { btn.disabled = false; }
+});
+
+document.getElementById('skip').addEventListener('click', async () => {
+  const reason = prompt('Why skip this one? (optional)') || '';
+  await postJSON(`/api/product/${SQUARE_ID}/skip`, { reason });
+  document.getElementById('search-status').textContent = 'Skipped.';
+});
+
+document.getElementById('upload').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const status = document.getElementById('upload-status');
+  status.textContent = 'Uploading…';
+  const response = await fetch(`/api/product/${SQUARE_ID}/upload`, {
+    method: 'POST', body: new FormData(e.currentTarget),
+  });
+  const data = await response.json();
+  if (!data.ok) { status.textContent = data.message || 'Upload failed'; return; }
+  candidates = data.candidates; render();
+  status.textContent = 'Added as a candidate. Approve it like any other.';
+  e.currentTarget.reset();
+});
+
+render();
+</script>
+{% endblock %}

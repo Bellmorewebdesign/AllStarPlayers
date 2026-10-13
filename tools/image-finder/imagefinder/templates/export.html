@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}Export{% endblock %}
+{% block body %}
+<h1>Export</h1>
+
+<p class="lead">
+  Writes the files the website understands into
+  <code>{{ settings.export_dir }}</code>. It does not touch the repository and
+  cannot publish anything.
+</p>
+
+<section class="panel">
+  <h2>Ready to export</h2>
+  <table class="grid">
+    <thead><tr><th>Product</th><th>Rights</th><th>Match confirmed</th><th>Downloaded</th></tr></thead>
+    <tbody>
+    {% for row in ready %}
+      <tr>
+        <td><a href="{{ url_for('product_detail', square_id=row.square_id) }}">{{ row.name }}</a><br>
+            <small class="muted">{{ row.square_id }}</small></td>
+        <td>{% if row.rights_status == 'permitted' %}<span class="tag tag--ok">permitted</span>
+            {% elif row.rights_status == 'not_permitted' %}<span class="tag tag--bad">not permitted</span>
+            {% else %}<span class="tag tag--unknown">unknown</span>{% endif %}</td>
+        <td>{% if row.match_confirmed %}<span class="tag tag--ok">yes</span>{% else %}<span class="tag tag--warn">no</span>{% endif %}</td>
+        <td>{% if row.download_status == 'ok' %}<span class="tag tag--ok">yes</span>{% else %}<span class="tag tag--warn">{{ row.download_status or 'not yet' }}</span>{% endif %}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="4" class="empty">Nothing has a main image yet.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="panel">
+  <h2>Write the files</h2>
+  <p class="fine">
+    Photographs whose rights are unknown are written to
+    <code>pending-rights.json</code> instead of the manifest. Finding an image
+    is not permission to publish it, so the website's manifest only ever gets
+    the ones whose licence somebody established.
+  </p>
+  <label class="check">
+    <input type="checkbox" id="include-unknown">
+    include unknown-rights images in the manifest anyway (not recommended)
+  </label>
+  <div class="row">
+    <button class="btn" id="run">Export now</button>
+    <span id="status" class="status"></span>
+  </div>
+  <pre id="result" class="result"></pre>
+</section>
+
+<section class="panel">
+  <h2>Putting them on the site</h2>
+  <ol class="steps">
+    <li>Copy <code>export/images/*</code> into the repository's <code>assets/products/</code>.</li>
+    <li>Merge <code>export/manifest.json</code>'s <code>images</code> object into <code>assets/products/manifest.json</code>.</li>
+    <li>Run <code>node tools/product-images.mjs --check</code>.</li>
+    <li>Look at the shop page, then commit.</li>
+  </ol>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.getElementById('run').addEventListener('click', async (e) => {
+  const status = document.getElementById('status');
+  status.textContent = 'Writing…';
+  const data = await postJSON('/api/export', {
+    include_unknown_rights: document.getElementById('include-unknown').checked,
+  });
+  status.textContent = data.ok ? 'Done.' : 'Failed.';
+  document.getElementById('result').textContent = JSON.stringify(data, null, 2);
+});
+</script>
+{% endblock %}

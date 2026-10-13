@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Products{% endblock %}
+{% block body %}
+<h1>Products</h1>
+
+<form class="filters" method="get">
+  <label>Show
+    <select name="scope">
+      <option value="missing" {% if scope=='missing' %}selected{% endif %}>needing a photograph</option>
+      <option value="all" {% if scope=='all' %}selected{% endif %}>all products</option>
+      <option value="has_photo" {% if scope=='has_photo' %}selected{% endif %}>already photographed</option>
+    </select>
+  </label>
+  <label>State
+    <select name="status">
+      <option value="">any</option>
+      {% for s in ['pending','reviewing','done','skipped','no_matches','search_failed'] %}
+        <option value="{{ s }}" {% if status==s %}selected{% endif %}>{{ s.replace('_',' ') }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>Find <input type="search" name="q" value="{{ q }}" placeholder="name, SKU or Square id"></label>
+  <button class="btn btn--sm">Apply</button>
+  <span class="status">{{ total }} match{{ '' if total == 1 else 'es' }}</span>
+</form>
+
+<table class="grid grid--products">
+  <thead>
+    <tr><th>Product</th><th>Square photo</th><th>Candidates</th><th>Approved</th><th>State</th><th></th></tr>
+  </thead>
+  <tbody>
+  {% for p in products %}
+    <tr>
+      <td>
+        <a href="{{ url_for('product_detail', square_id=p.square_id) }}"><b>{{ p.name }}</b></a>
+        <br><small>{{ p.category_names or 'no category' }}
+          {% if p.colors %}· {{ p.colors }}{% endif %}
+          {% if p.skus %}· SKU {{ p.skus }}{% endif %}</small>
+        <br><small class="muted">{{ p.square_id }}</small>
+      </td>
+      <td>{% if p.square_image_count %}<span class="tag tag--ok">{{ p.square_image_count }}</span>{% else %}<span class="tag">none</span>{% endif %}</td>
+      <td>{{ p.candidates }}</td>
+      <td>{{ p.approved }}{% if p.has_main %} <span class="tag tag--ok">main set</span>{% endif %}</td>
+      <td><span class="tag tag--{{ p.status }}">{{ p.status.replace('_',' ') }}</span>
+        {% if p.status_note %}<br><small>{{ p.status_note }}</small>{% endif %}</td>
+      <td><a class="btn btn--sm" href="{{ url_for('product_detail', square_id=p.square_id) }}">Review</a></td>
+    </tr>
+  {% else %}
+    <tr><td colspan="6" class="empty">
+      Nothing here. {% if not counts.products %}Import the catalog from the
+      <a href="{{ url_for('dashboard') }}">dashboard</a> first.{% endif %}
+    </td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+{% set pages = (total // per_page) + (1 if total % per_page else 0) %}
+{% if pages > 1 %}
+<nav class="pager">
+  {% if page > 1 %}<a href="{{ url_for('product_list', scope=scope, status=status, q=q, page=page-1) }}">← previous</a>{% endif %}
+  <span>page {{ page }} of {{ pages }}</span>
+  {% if page < pages %}<a href="{{ url_for('product_list', scope=scope, status=status, q=q, page=page+1) }}">next →</a>{% endif %}
+</nav>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block body %}
+<h1>Product photographs</h1>
+
+<p class="lead">
+  Products come from the shop's public API. No Square token is needed and
+  nothing here can change prices, stock or the live website.
+</p>
+
+<section class="cards">
+  <div class="card">
+    <b>{{ counts.products }}</b><span>products imported</span>
+    <small>{{ last_import or 'not imported yet' }}{% if last_build %} · build {{ last_build }}{% endif %}</small>
+  </div>
+  <div class="card">
+    <b>{{ counts.missing_photo }}</b><span>with no Square photograph</span>
+    <small>{{ counts.with_square_image }} already have one</small>
+  </div>
+  <div class="card">
+    <b>{{ counts.products_with_approved }}</b><span>with something approved</span>
+    <small>{{ counts.main_images }} have a main image</small>
+  </div>
+  <div class="card">
+    <b>{{ counts.candidates }}</b><span>candidates collected</span>
+    <small>{{ counts.searches }} searches cached, {{ counts.billable_searches }} of them billable</small>
+  </div>
+</section>
+
+<section class="panel">
+  <h2>1. Import the catalog</h2>
+  <p>
+    Reads <code>{{ api_base }}</code> page by page, following the pinned
+    cursors. Safe to repeat: products are matched on their Square id, so your
+    queries, candidates and decisions survive.
+  </p>
+  <button id="import" class="btn">Import products</button>
+  <span id="import-status" class="status"></span>
+</section>
+
+<section class="panel">
+  <h2>2. Work through the products</h2>
+  <p>
+    The list starts with the ones that have no photograph. Each product has
+    editable searches, a grid of candidates, and approve / reject / skip /
+    upload.
+  </p>
+  <a class="btn" href="{{ url_for('product_list', scope='missing') }}">Products needing a photo</a>
+  <a class="btn btn--quiet" href="{{ url_for('product_list', scope='all') }}">All products</a>
+</section>
+
+<section class="panel">
+  <h2>3. Export</h2>
+  <p>
+    Writes <code>manifest.json</code> in the website's format, a gallery file
+    for the extra approved photographs, and the optimised images. Copying them
+    into the repository stays a separate, deliberate step.
+  </p>
+  <a class="btn" href="{{ url_for('export_page') }}">Go to export</a>
+</section>
+
+<section class="panel">
+  <h2>Search providers</h2>
+  <table class="grid">
+    <thead><tr><th>Provider</th><th>Costs</th><th>State</th><th>Today</th></tr></thead>
+    <tbody>
+    {% for p in providers %}
+      <tr>
+        <td><b>{{ p.label }}</b><br><small>{{ p.cost_note }}</small></td>
+        <td>{% if p.billable %}<span class="tag tag--pay">billable</span>{% else %}<span class="tag tag--free">free</span>{% endif %}</td>
+        <td>
+          {% if p.configured %}<span class="tag tag--ok">ready</span>
+          {% else %}<span class="tag">off — {{ p.why_not }}</span>{% endif %}
+        </td>
+        <td>
+          {{ budgets[p.name].used }}{% if budgets[p.name].budget %} / {{ budgets[p.name].budget }}{% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <p class="fine">
+    Costs change. The figures here were checked in October 2026 — confirm on the
+    provider's own pricing page before switching a billable one on.
+    <a href="{{ url_for('settings_page') }}">Settings</a>
+  </p>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.getElementById('import').addEventListener('click', async (e) => {
+  const btn = e.currentTarget, status = document.getElementById('import-status');
+  btn.disabled = true; status.textContent = 'Reading the catalog…';
+  try {
+    const data = await postJSON('/api/import', {});
+    status.textContent = data.ok
+      ? `${data.products} products from build ${data.build_id}` +
+        (data.restarts ? ` (restarted ${data.restarts}× — the catalog was rebuilt mid-read)` : '') +
+        `, ${data.missing_photo} with no photograph.`
+      : `Import failed: ${data.message}`;
+    if (data.ok) setTimeout(() => location.reload(), 1200);
+  } catch (err) {
+    status.textContent = 'Import failed: ' + err.message;
+  } finally { btn.disabled = false; }
+});
+</script>
+{% endblock %}

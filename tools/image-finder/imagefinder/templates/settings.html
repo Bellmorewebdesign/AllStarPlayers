@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+{% block title %}Settings{% endblock %}
+{% block body %}
+<h1>Settings</h1>
+
+<section class="panel">
+  <h2>What the providers cost</h2>
+  <p class="fine">
+    Checked October 2026. Prices and free tiers move — confirm on the provider's
+    own page before switching a billable one on. Keys are kept in
+    <code>{{ settings.config_path }}</code> on this machine and are never sent
+    anywhere but to that provider.
+  </p>
+
+  <form id="providers">
+  {% for p in providers %}
+    <fieldset class="prov">
+      <legend>{{ p.label }}
+        {% if p.billable %}<span class="tag tag--pay">billable</span>{% else %}<span class="tag tag--free">free</span>{% endif %}
+      </legend>
+      <p class="fine">{{ p.cost_note }} <a href="{{ p.homepage }}" target="_blank" rel="noopener">docs ↗</a></p>
+      <div class="row">
+        <label class="check"><input type="checkbox" data-field="enabled" data-prov="{{ p.name }}" {% if p.enabled %}checked{% endif %}> use this provider</label>
+        {% if p.needs_key %}
+          <label>API key
+            <input type="password" data-field="api_key" data-prov="{{ p.name }}"
+                   placeholder="{{ 'stored — leave to keep' if p.has_key else 'not set' }}"
+                   value="{{ '__unchanged__' if p.has_key else '' }}">
+          </label>
+        {% endif %}
+        {% if p.name == 'google_cse' %}
+          <label>Search engine id (cx)
+            <input type="text" data-field="cx" data-prov="{{ p.name }}" value="">
+          </label>
+        {% endif %}
+        <label>Daily budget (calls)
+          <input type="number" min="0" data-field="daily_budget" data-prov="{{ p.name }}" value="{{ p.daily_budget }}">
+        </label>
+        <label>Seconds between calls
+          <input type="number" min="0" step="0.1" data-field="min_interval_seconds" data-prov="{{ p.name }}" value="{{ p.min_interval_seconds }}">
+        </label>
+        <span class="status">used today: {{ budgets[p.name] }}</span>
+      </div>
+      {% if p.billable %}
+      <p class="fine">
+        A billable provider with a budget of 0 is never called, so a mistake
+        costs nothing. Failed calls count against the budget too, because a
+        provider may bill for them.
+      </p>
+      {% endif %}
+    </fieldset>
+  {% endfor %}
+
+  <fieldset class="prov">
+    <legend>This run</legend>
+    <div class="row">
+      <label>Candidates to collect per product
+        <input type="number" min="1" max="30" id="per-product" value="{{ settings.candidates_per_product }}">
+      </label>
+      <label>Store API
+        <input type="text" id="api-base" value="{{ settings.api_base }}" size="60">
+      </label>
+    </div>
+  </fieldset>
+
+  <button class="btn" id="save">Save settings</button>
+  <span id="save-status" class="status"></span>
+  </form>
+</section>
+
+<section class="panel">
+  <h2>Where things are kept</h2>
+  <table class="grid">
+    <tr><td>database</td><td><code>{{ settings.db_path }}</code></td></tr>
+    <tr><td>originals</td><td><code>{{ settings.originals_dir }}</code></td></tr>
+    <tr><td>optimised</td><td><code>{{ settings.optimized_dir }}</code></td></tr>
+    <tr><td>exports</td><td><code>{{ settings.export_dir }}</code></td></tr>
+  </table>
+  <p class="fine">Stopping the program loses nothing: everything above survives a restart.</p>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.getElementById('save').addEventListener('click', async (e) => {
+  e.preventDefault();
+  const providers = {};
+  document.querySelectorAll('[data-prov]').forEach(el => {
+    const name = el.dataset.prov, field = el.dataset.field;
+    providers[name] = providers[name] || {};
+    if (el.type === 'checkbox') providers[name][field] = el.checked;
+    else if (el.value !== '') providers[name][field] = el.value;
+  });
+  const status = document.getElementById('save-status');
+  status.textContent = 'Saving…';
+  const data = await postJSON('/api/settings', {
+    providers,
+    candidates_per_product: Number(document.getElementById('per-product').value),
+    api_base: document.getElementById('api-base').value,
+  });
+  status.textContent = data.ok ? 'Saved.' : 'Could not save.';
+  if (data.ok) setTimeout(() => location.reload(), 700);
+});
+</script>
+{% endblock %}

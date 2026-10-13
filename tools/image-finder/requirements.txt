@@ -1,0 +1,4 @@
+# Everything this needs. No AI libraries, no paid model clients.
+Flask==3.0.3
+requests==2.32.3
+Pillow==10.4.0
