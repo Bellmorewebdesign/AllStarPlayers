@@ -1,0 +1,12 @@
+# A run keeps its database, downloads and keys outside the repository, but
+# just in case somebody points IMAGEFINDER_HOME in here:
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+config.json
+originals/
+optimized/
+export/
+__pycache__/
+*.pyc
+.venv/

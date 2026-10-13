@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Image finder{% endblock %} · All Star Players</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="{{ url_for('dashboard') }}">
+    <span class="star">&#9733;</span> Image finder
+  </a>
+  <nav>
+    <a href="{{ url_for('dashboard') }}">Dashboard</a>
+    <a href="{{ url_for('product_list') }}">Products</a>
+    <a href="{{ url_for('export_page') }}">Export</a>
+    <a href="{{ url_for('settings_page') }}">Settings</a>
+  </nav>
+  <span class="local">runs on your machine · nothing is published</span>
+</header>
+
+<main>
+{% block body %}{% endblock %}
+</main>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>
